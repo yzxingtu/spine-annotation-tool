@@ -21,15 +21,23 @@ class YOLOConverter:
     def scan_dataset(self, dataset_root: str) -> List[dict]:
         """Scan dataset and return list of image info (without loading pixels).
         
-        Returns list of dicts with keys: image_path, label_path, width, height, has_labels
+        Auto-detects: if selected dir contains train/valid/test, use as root.
+        If selected dir IS a split (contains images/), scan directly.
         """
         root = Path(dataset_root)
         result = []
 
-        for split in ["train", "valid", "test"]:
-            images_dir = root / split / "images"
-            labels_dir = root / split / "labels"
+        # Detect if this is the dataset root (has train/, valid/, test/ subdirs)
+        splits = ["train", "valid", "test"]
+        is_root = any((root / s / "images").exists() for s in splits)
 
+        if is_root:
+            scan_dirs = [(root / s / "images", root / s / "labels") for s in splits]
+        else:
+            # Assume selected dir is already a split directory
+            scan_dirs = [(root / "images", root / "labels")]
+
+        for images_dir, labels_dir in scan_dirs:
             if not images_dir.exists():
                 continue
 
