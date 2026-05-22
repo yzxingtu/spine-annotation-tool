@@ -177,6 +177,7 @@ class AnnotationCanvas(QGraphicsView):
         """Load an image and its annotations into the canvas."""
         self._scene.clear()
         self._obb_items.clear()
+        self._index_map = []
         self._current_selection = -1
 
         # Load image
@@ -187,11 +188,19 @@ class AnnotationCanvas(QGraphicsView):
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
 
-        # Add annotation items
-        for i, ann in enumerate(annotations):
-            item = OBBGraphicsItem(ann, i)
+        # Sort annotations: draw large boxes (spine) first, then small boxes (vertebrae)
+        # so that vertebrae boxes are on top and easier to select
+        sorted_anns = sorted(enumerate(annotations), key=lambda x: x[1].width * x[1].height, reverse=True)
+        
+        # Re-index after sorting: store mapping from scene item index to original annotation index
+        self._index_map = []  # _index_map[scene_idx] = original_idx
+        for scene_idx, (old_idx, ann) in enumerate(sorted_anns):
+            item = OBBGraphicsItem(ann, old_idx)
+            # Set Z-value based on area: larger boxes get lower Z (drawn first)
+            item.setZValue(1)
             self._scene.addItem(item)
             self._obb_items.append(item)
+            self._index_map.append(old_idx)
 
         self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
 
@@ -263,9 +272,16 @@ class AnnotationCanvas(QGraphicsView):
         # Check if clicking on any annotation
         clicked_item = self._scene.itemAt(scene_pos, self.transform())
         if isinstance(clicked_item, OBBGraphicsItem):
-            self.select_annotation(clicked_item.index)
-            self._drag_mode = "move"
-            self._drag_start_pos = scene_pos
+            # Find the scene item's index in _obb_items (may differ from annotation.index due to sorting)
+            scene_idx = -1
+            for i, item in enumerate(self._obb_items):
+                if item is clicked_item:
+                    scene_idx = i
+                    break
+            if scene_idx >= 0:
+                self.select_annotation(scene_idx)
+                self._drag_mode = "move"
+                self._drag_start_pos = scene_pos
             return
 
         # Clicked on empty space - deselect
