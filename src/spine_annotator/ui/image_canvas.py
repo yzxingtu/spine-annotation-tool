@@ -22,6 +22,10 @@ CLASS_COLORS = [
     QColor(0, 100, 255, 180),  # blue - normal spine
 ]
 
+# End vertebra colors
+UPPER_END_COLOR = QColor(0, 255, 255, 220)   # cyan - 上端椎
+LOWER_END_COLOR = QColor(255, 0, 255, 220)   # magenta - 下端椎
+
 SELECTED_COLOR = QColor(255, 255, 0, 220)  # yellow
 HANDLE_SIZE = 6  # corner handle radius in pixels
 ROTATE_HANDLE_OFFSET = 25  # distance of rotation handle from box
@@ -58,12 +62,21 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         if not self.annotation.visible:
             return
 
-        color = CLASS_COLORS[self.annotation.class_id % len(CLASS_COLORS)]
+        color = self._get_color()
         pen = QPen(color, 2)
         self.setPen(pen)
         self.setBrush(QBrush(QColor(0, 0, 0, 0)))
         # Restore Z-value based on class (not selection)
         self._apply_z_value()
+
+    def _get_color(self):
+        """Get color based on annotation type and end vertebra markers."""
+        if self.annotation.class_id == 0:
+            if self.annotation.is_upper_end:
+                return UPPER_END_COLOR
+            elif self.annotation.is_lower_end:
+                return LOWER_END_COLOR
+        return CLASS_COLORS[self.annotation.class_id % len(CLASS_COLORS)]
 
     def _apply_z_value(self):
         """Set Z-value based on class type: vertebrae always above spine boxes."""
@@ -82,8 +95,6 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         if selected:
             pen = QPen(SELECTED_COLOR, 3)
             self.setPen(pen)
-            # Small Z bump when selected, but keep class-based ordering
-            base_z = 1000 if self.annotation.class_id == 0 else 1
             area = max(self.annotation.width * self.annotation.height, 1)
             inv_area = 1.0 / area
             if self.annotation.class_id == 0:
@@ -91,7 +102,7 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
             else:
                 self.setZValue(10 + inv_area * 0.1)
         else:
-            color = CLASS_COLORS[self.annotation.class_id % len(CLASS_COLORS)]
+            color = self._get_color()
             pen = QPen(color, 2)
             self.setPen(pen)
             self._apply_z_value()
@@ -261,6 +272,17 @@ class AnnotationCanvas(QGraphicsView):
             return
 
         ann.rotate(math.radians(angle_deg))
+        self._obb_items[self._current_selection]._update_polygon()
+        self.annotation_modified.emit()
+        self.viewport().update()
+
+    def move_selected(self, dx: float, dy: float):
+        """Move the selected annotation by dx, dy pixels."""
+        ann = self.get_selected_annotation()
+        if ann is None:
+            return
+
+        ann.move(dx, dy)
         self._obb_items[self._current_selection]._update_polygon()
         self.annotation_modified.emit()
         self.viewport().update()

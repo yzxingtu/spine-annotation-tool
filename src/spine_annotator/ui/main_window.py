@@ -227,6 +227,32 @@ class MainWindow(QMainWindow):
         nav_row.addWidget(self._btn_next)
         right_layout.addLayout(nav_row)
 
+        # Shortcut reference
+        right_layout.addSpacing(12)
+        right_layout.addWidget(self._create_section_label("快捷键"))
+        shortcut_help = QLabel(
+            "旋转: R/E ±5° | T/Y ±1°\n"
+            "精旋: Shift+R/E ±0.5°\n"
+            "移动: W/A/S/D 5px\n"
+            "精移: Shift+W/A/S/D 1px\n"
+            "导航: ←/→ 图片 | ↑/↓ 标注\n"
+            "其他: F 适配 | Esc 取消\n"
+            "      Ctrl+S 保存"
+        )
+        shortcut_help.setStyleSheet("color: #666; font-size: 11px; line-height: 1.4;")
+        shortcut_help.setWordWrap(True)
+        right_layout.addWidget(shortcut_help)
+
+        # Color legend
+        right_layout.addSpacing(8)
+        color_legend = QLabel(
+            "■ 绿色: 椎骨 | ■ 青色: 上端椎\n"
+            "■ 紫色: 下端椎 | ■ 红/蓝: 脊柱"
+        )
+        color_legend.setStyleSheet("color: #666; font-size: 11px;")
+        color_legend.setWordWrap(True)
+        right_layout.addWidget(color_legend)
+
         right_layout.addStretch()
         right_panel.setFixedWidth(240)
 
@@ -246,14 +272,31 @@ class MainWindow(QMainWindow):
     def _init_shortcuts(self):
         """Initialize keyboard shortcuts."""
         shortcuts = {
+            # Navigation
             QKeySequence("Left"): self._prev_image,
             QKeySequence("Right"): self._next_image,
             QKeySequence("Up"): self._select_prev_annotation,
             QKeySequence("Down"): self._select_next_annotation,
+            # Rotation (coarse ±5°)
             QKeySequence("R"): lambda: self._canvas.rotate_selected(-5),
             QKeySequence("E"): lambda: self._canvas.rotate_selected(5),
+            # Rotation (fine ±1°)
             QKeySequence("T"): lambda: self._canvas.rotate_selected(-1),
             QKeySequence("Y"): lambda: self._canvas.rotate_selected(1),
+            # Rotation (super fine ±0.5°)
+            QKeySequence("Shift+R"): lambda: self._canvas.rotate_selected(-0.5),
+            QKeySequence("Shift+E"): lambda: self._canvas.rotate_selected(0.5),
+            # Move (coarse 5px)
+            QKeySequence("W"): lambda: self._canvas.move_selected(0, -5),
+            QKeySequence("S"): lambda: self._canvas.move_selected(0, 5),
+            QKeySequence("A"): lambda: self._canvas.move_selected(-5, 0),
+            QKeySequence("D"): lambda: self._canvas.move_selected(5, 0),
+            # Move (fine 1px)
+            QKeySequence("Shift+W"): lambda: self._canvas.move_selected(0, -1),
+            QKeySequence("Shift+S"): lambda: self._canvas.move_selected(0, 1),
+            QKeySequence("Shift+A"): lambda: self._canvas.move_selected(-1, 0),
+            QKeySequence("Shift+D"): lambda: self._canvas.move_selected(1, 0),
+            # Save / undo / fit
             QKeySequence("Ctrl+S"): self._save_current,
             QKeySequence("Ctrl+Z"): self._undo,
             QKeySequence("Escape"): lambda: self._canvas.select_annotation(-1),
