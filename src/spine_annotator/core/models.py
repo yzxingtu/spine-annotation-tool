@@ -33,6 +33,13 @@ class OBBAnnotation:
     angle: float = field(init=False)  # radians, 0 = horizontal
     width: float = field(init=False)
     height: float = field(init=False)
+    
+    # End vertebra markers for Cobb angle calculation
+    is_upper_end: bool = False  # 上端椎
+    is_lower_end: bool = False  # 下端椎
+    
+    # Visibility (layer control)
+    visible: bool = True
 
     def __post_init__(self):
         self._update_geometry()

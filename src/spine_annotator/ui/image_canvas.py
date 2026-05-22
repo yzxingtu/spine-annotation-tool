@@ -53,10 +53,28 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
 
         self.setPolygon(poly)
 
+        # Visibility control
+        self.setVisible(self.annotation.visible)
+        if not self.annotation.visible:
+            return
+
         color = CLASS_COLORS[self.annotation.class_id % len(CLASS_COLORS)]
         pen = QPen(color, 2)
         self.setPen(pen)
         self.setBrush(QBrush(QColor(0, 0, 0, 0)))
+        # Restore Z-value based on class (not selection)
+        self._apply_z_value()
+
+    def _apply_z_value(self):
+        """Set Z-value based on class type: vertebrae always above spine boxes."""
+        # Vertebrae (class 0) get Z=1000+, spine boxes get Z=1+
+        # Within same class, smaller boxes get slightly higher Z
+        area = max(self.annotation.width * self.annotation.height, 1)
+        inv_area = 1.0 / area
+        if self.annotation.class_id == 0:  # Vertebra
+            self.setZValue(1000 + inv_area * 100)
+        else:  # Spine boxes
+            self.setZValue(1 + inv_area * 0.1)
 
     def set_selected(self, selected: bool):
         """Update visual state when selected."""
@@ -64,12 +82,19 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         if selected:
             pen = QPen(SELECTED_COLOR, 3)
             self.setPen(pen)
-            self.setZValue(10)
+            # Small Z bump when selected, but keep class-based ordering
+            base_z = 1000 if self.annotation.class_id == 0 else 1
+            area = max(self.annotation.width * self.annotation.height, 1)
+            inv_area = 1.0 / area
+            if self.annotation.class_id == 0:
+                self.setZValue(1100 + inv_area * 100)
+            else:
+                self.setZValue(10 + inv_area * 0.1)
         else:
             color = CLASS_COLORS[self.annotation.class_id % len(CLASS_COLORS)]
             pen = QPen(color, 2)
             self.setPen(pen)
-            self.setZValue(1)
+            self._apply_z_value()
         self.update()
 
     def paint(self, painter, option, widget=None):
@@ -115,6 +140,15 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         """Draw class name label above the box."""
         p0 = self.annotation.points[0]
         label = f"{self.annotation.class_name} ({math.degrees(self.annotation.angle):.1f}°)"
+        
+        # Add end vertebra markers
+        markers = []
+        if self.annotation.is_upper_end:
+            markers.append("上端椎")
+        if self.annotation.is_lower_end:
+            markers.append("下端椎")
+        if markers:
+            label += f" [{', '.join(markers)}]"
         
         painter.setPen(QPen(SELECTED_COLOR))
         painter.setFont(QFont("Arial", 10, QFont.Bold))
@@ -188,16 +222,12 @@ class AnnotationCanvas(QGraphicsView):
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
 
-        # Sort annotations: draw large boxes (spine) first, then small boxes (vertebrae)
-        # so that vertebrae boxes are on top and easier to select
+        # Sort annotations by area (large first) for consistent ordering
         sorted_anns = sorted(enumerate(annotations), key=lambda x: x[1].width * x[1].height, reverse=True)
         
-        # Re-index after sorting: store mapping from scene item index to original annotation index
         self._index_map = []  # _index_map[scene_idx] = original_idx
         for scene_idx, (old_idx, ann) in enumerate(sorted_anns):
             item = OBBGraphicsItem(ann, old_idx)
-            # Set Z-value based on area: larger boxes get lower Z (drawn first)
-            item.setZValue(1)
             self._scene.addItem(item)
             self._obb_items.append(item)
             self._index_map.append(old_idx)
@@ -235,6 +265,12 @@ class AnnotationCanvas(QGraphicsView):
         self.annotation_modified.emit()
         self.viewport().update()
 
+    def get_original_index(self) -> int:
+        """Get the original annotation index for the currently selected item."""
+        if 0 <= self._current_selection < len(self._index_map):
+            return self._index_map[self._current_selection]
+        return -1
+
     # --- Mouse Event Handlers ---
 
     def mousePressEvent(self, event):
@@ -270,9 +306,18 @@ class AnnotationCanvas(QGraphicsView):
                 return
 
         # Check if clicking on any annotation
-        clicked_item = self._scene.itemAt(scene_pos, self.transform())
-        if isinstance(clicked_item, OBBGraphicsItem):
-            # Find the scene item's index in _obb_items (may differ from annotation.index due to sorting)
+        # Iterate from top (highest Z) to bottom to find the topmost visible item
+        clicked_item = None
+        for item in reversed(sorted(self._obb_items, key=lambda it: it.zValue())):
+            if not item.isVisible():
+                continue
+            # Check if scene_pos is inside the polygon shape
+            if item.shape().contains(item.mapFromScene(scene_pos)):
+                clicked_item = item
+                break
+        
+        if clicked_item is not None:
+            # Find the scene item's index in _obb_items
             scene_idx = -1
             for i, item in enumerate(self._obb_items):
                 if item is clicked_item:

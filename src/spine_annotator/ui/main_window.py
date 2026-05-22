@@ -9,7 +9,7 @@ from typing import List, Optional
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QShortcut,
     QStatusBar, QVBoxLayout, QWidget,
@@ -39,7 +39,11 @@ class MainWindow(QMainWindow):
 
         # Current loaded annotation (only one at a time)
         self._current_annotation: Optional[ImageAnnotation] = None
-        self._cache: dict = {}  # progress cache: {image_path: {"modified": bool, "saved": bool}}
+        self._cache: dict = {}  # progress cache
+        
+        # Layer visibility
+        self._show_vertebrae = True
+        self._show_spine = True
 
         self._init_ui()
         self._init_shortcuts()
@@ -122,6 +126,21 @@ class MainWindow(QMainWindow):
 
         right_layout.addSpacing(16)
 
+        # Layer control
+        right_layout.addWidget(self._create_section_label("图层控制"))
+        
+        self._chk_vertebrae = QCheckBox("显示椎骨框 (绿色)")
+        self._chk_vertebrae.setChecked(True)
+        self._chk_vertebrae.stateChanged.connect(self._on_layer_changed)
+        right_layout.addWidget(self._chk_vertebrae)
+        
+        self._chk_spine = QCheckBox("显示脊柱框 (红色/蓝色)")
+        self._chk_spine.setChecked(True)
+        self._chk_spine.stateChanged.connect(self._on_layer_changed)
+        right_layout.addWidget(self._chk_spine)
+
+        right_layout.addSpacing(12)
+
         # Annotation info
         right_layout.addWidget(self._create_section_label("当前标注"))
         self._ann_info_label = QLabel("无选中")
@@ -163,6 +182,38 @@ class MainWindow(QMainWindow):
         self._btn_set_angle.clicked.connect(self._apply_angle)
         angle_row.addWidget(self._btn_set_angle)
         right_layout.addLayout(angle_row)
+
+        right_layout.addSpacing(12)
+
+        # End vertebra markers
+        right_layout.addWidget(self._create_section_label("端椎标记"))
+        
+        # 上端椎
+        upper_layout = QHBoxLayout()
+        self._chk_upper_end = QCheckBox("上端椎")
+        self._chk_upper_end.stateChanged.connect(self._on_end_vertebra_changed)
+        upper_layout.addWidget(self._chk_upper_end)
+        
+        # Tooltip button
+        btn_tip_upper = QPushButton("?")
+        btn_tip_upper.setFixedSize(20, 20)
+        btn_tip_upper.setStyleSheet("font-weight: bold; color: #666;")
+        btn_tip_upper.setToolTip("上端椎：脊柱侧弯弯曲开始处的第一个椎骨，其上终板用于测量Cobb角")
+        upper_layout.addWidget(btn_tip_upper)
+        right_layout.addLayout(upper_layout)
+        
+        # 下端椎
+        lower_layout = QHBoxLayout()
+        self._chk_lower_end = QCheckBox("下端椎")
+        self._chk_lower_end.stateChanged.connect(self._on_end_vertebra_changed)
+        lower_layout.addWidget(self._chk_lower_end)
+        
+        btn_tip_lower = QPushButton("?")
+        btn_tip_lower.setFixedSize(20, 20)
+        btn_tip_lower.setStyleSheet("font-weight: bold; color: #666;")
+        btn_tip_lower.setToolTip("下端椎：脊柱侧弯弯曲结束处的最后一个椎骨，其下终板用于测量Cobb角")
+        lower_layout.addWidget(btn_tip_lower)
+        right_layout.addLayout(lower_layout)
 
         # Navigation
         right_layout.addSpacing(16)
@@ -285,9 +336,14 @@ class MainWindow(QMainWindow):
         info = self._image_infos[index]
 
         # Lazy load annotations for this image
+        cache_entry = self._cache.get(info["image_path"])
         self._current_annotation = self._converter.load_single(
-            info["image_path"], info["label_path"], info["width"], info["height"]
+            info["image_path"], info["label_path"], info["width"], info["height"],
+            cache_entry=cache_entry,
         )
+
+        # Apply layer visibility
+        self._apply_layer_visibility()
 
         self._image_list_widget.setCurrentRow(index)
         self._canvas.load_image(info["image_path"], self._current_annotation.annotations)
@@ -306,20 +362,18 @@ class MainWindow(QMainWindow):
     def _select_prev_annotation(self):
         if not self._image_infos:
             return
-        ann = self._current_annotation
-        if ann and ann.annotations:
+        if self._canvas._obb_items:
             idx = self._canvas._current_selection - 1
             if idx < 0:
-                idx = len(ann.annotations) - 1
+                idx = len(self._canvas._obb_items) - 1
             self._canvas.select_annotation(idx)
 
     def _select_next_annotation(self):
         if not self._image_infos:
             return
-        ann = self._current_annotation
-        if ann and ann.annotations:
+        if self._canvas._obb_items:
             idx = self._canvas._current_selection + 1
-            if idx >= len(ann.annotations):
+            if idx >= len(self._canvas._obb_items):
                 idx = 0
             self._canvas.select_annotation(idx)
 
@@ -336,10 +390,23 @@ class MainWindow(QMainWindow):
         """Update info panel when selection changes."""
         if index < 0 or not self._current_annotation:
             self._ann_info_label.setText("无选中")
+            # Reset end vertebra checkboxes
+            self._chk_upper_end.blockSignals(True)
+            self._chk_upper_end.setChecked(False)
+            self._chk_upper_end.blockSignals(False)
+            self._chk_lower_end.blockSignals(True)
+            self._chk_lower_end.setChecked(False)
+            self._chk_lower_end.blockSignals(False)
             return
 
-        if 0 <= index < len(self._current_annotation.annotations):
-            ann = self._current_annotation.annotations[index]
+        # Map scene index to original annotation index
+        if 0 <= index < len(self._canvas._index_map):
+            orig_idx = self._canvas._index_map[index]
+        else:
+            orig_idx = index
+
+        if 0 <= orig_idx < len(self._current_annotation.annotations):
+            ann = self._current_annotation.annotations[orig_idx]
             angle_deg = math.degrees(ann.angle)
             self._ann_info_label.setText(
                 f"类别: {ann.class_name} (ID={ann.class_id})\n"
@@ -352,12 +419,54 @@ class MainWindow(QMainWindow):
             self._angle_spin.setValue(angle_deg)
             self._angle_spin.blockSignals(False)
 
+            # Update end vertebra checkboxes
+            self._chk_upper_end.blockSignals(True)
+            self._chk_upper_end.setChecked(ann.is_upper_end)
+            self._chk_upper_end.blockSignals(False)
+            self._chk_lower_end.blockSignals(True)
+            self._chk_lower_end.setChecked(ann.is_lower_end)
+            self._chk_lower_end.blockSignals(False)
+
     def _on_annotation_modified(self):
         """Mark current image as modified."""
         if self._current_annotation:
             self._current_annotation.modified = True
             self._on_annotation_selected(self._canvas._current_selection)
             self._update_status()
+
+    def _on_layer_changed(self):
+        """Handle layer visibility checkbox changes."""
+        self._show_vertebrae = self._chk_vertebrae.isChecked()
+        self._show_spine = self._chk_spine.isChecked()
+        self._apply_layer_visibility()
+        self._canvas.viewport().update()
+
+    def _apply_layer_visibility(self):
+        """Apply layer visibility to all annotations."""
+        if not self._current_annotation:
+            return
+        for ann in self._current_annotation.annotations:
+            if ann.class_id == 0:  # Vertebra
+                ann.visible = self._show_vertebrae
+            else:  # Spine boxes
+                ann.visible = self._show_spine
+        # Update canvas items
+        for item in self._canvas._obb_items:
+            item.setVisible(item.annotation.visible)
+
+    def _on_end_vertebra_changed(self):
+        """Handle end vertebra checkbox changes."""
+        ann = self._canvas.get_selected_annotation()
+        if ann is None:
+            return
+        ann.is_upper_end = self._chk_upper_end.isChecked()
+        ann.is_lower_end = self._chk_lower_end.isChecked()
+        if self._current_annotation:
+            self._current_annotation.modified = True
+        # Refresh canvas to show/hide markers
+        if 0 <= self._canvas._current_selection < len(self._canvas._obb_items):
+            self._canvas._obb_items[self._canvas._current_selection].update()
+        self._canvas.viewport().update()
 
     def _on_angle_spin_changed(self, value: float):
         """Called when angle spinbox value changes (but not applied yet)."""
@@ -398,9 +507,19 @@ class MainWindow(QMainWindow):
         else:
             self._converter.save_obb_xywhr(self._current_annotation, self._output_dir, overwrite=True)
 
-        # Update cache
+        # Update cache with end vertebra state
         img_path = info["image_path"]
-        self._cache[img_path] = {"modified": False, "saved": True}
+        ann_states = []
+        for ann in self._current_annotation.annotations:
+            ann_states.append({
+                "is_upper_end": ann.is_upper_end,
+                "is_lower_end": ann.is_lower_end,
+            })
+        self._cache[img_path] = {
+            "modified": False,
+            "saved": True,
+            "annotation_states": ann_states,
+        }
         self._current_annotation.modified = False
 
         # Save cache to disk

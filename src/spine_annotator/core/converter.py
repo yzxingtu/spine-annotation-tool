@@ -16,6 +16,8 @@ class YOLOConverter:
             0: "Vertebra",
             1: "scoliosis spine",
             2: "normal spine",
+            3: "upper_end_vertebra",  # 上端椎
+            4: "lower_end_vertebra",  # 下端椎
         }
 
     def scan_dataset(self, dataset_root: str) -> List[dict]:
@@ -64,8 +66,12 @@ class YOLOConverter:
         return result
 
     def load_single(self, image_path: str, label_path: Optional[str],
-                    img_w: int, img_h: int) -> ImageAnnotation:
-        """Load annotations for a single image on demand."""
+                    img_w: int, img_h: int, cache_entry: Optional[dict] = None) -> ImageAnnotation:
+        """Load annotations for a single image on demand.
+        
+        Args:
+            cache_entry: Optional cache entry to restore end vertebra markers
+        """
         annotation = ImageAnnotation(
             image_path=image_path,
             image_width=img_w,
@@ -76,11 +82,19 @@ class YOLOConverter:
             annotation.annotations = self._load_labels(
                 Path(label_path), img_w, img_h
             )
+            
+            # Restore end vertebra markers from cache
+            if cache_entry and "annotation_states" in cache_entry:
+                states = cache_entry["annotation_states"]
+                for i, ann in enumerate(annotation.annotations):
+                    if i < len(states):
+                        ann.is_upper_end = states[i].get("is_upper_end", False)
+                        ann.is_lower_end = states[i].get("is_lower_end", False)
 
         return annotation
 
     def save_progress_cache(self, cache_path: str, progress: dict):
-        """Save progress cache to JSON file."""
+        """Save progress cache to JSON file (includes end vertebra markers)."""
         import json
         with open(cache_path, "w") as f:
             json.dump(progress, f, indent=2)
@@ -92,6 +106,21 @@ class YOLOConverter:
             return {}
         with open(cache_path, "r") as f:
             return json.load(f)
+
+    def save_annotation_state(self, annotation: ImageAnnotation, cache: dict):
+        """Save annotation state including end vertebra markers to cache."""
+        img_path = annotation.image_path
+        ann_states = []
+        for ann in annotation.annotations:
+            ann_states.append({
+                "is_upper_end": ann.is_upper_end,
+                "is_lower_end": ann.is_lower_end,
+            })
+        cache[img_path] = {
+            "saved": True,
+            "modified": annotation.modified,
+            "annotation_states": ann_states,
+        }
 
     def _load_labels(self, label_path: Path,
                      img_w: int, img_h: int) -> List[OBBAnnotation]:
@@ -143,13 +172,21 @@ class YOLOConverter:
 
         with open(label_path, "w") as f:
             for ann in annotation.annotations:
+                # Determine effective class_id: end vertebra markers override class
+                eff_class = ann.class_id
+                if ann.class_id == 0:  # Only vertebrae can be end vertebrae
+                    if ann.is_upper_end:
+                        eff_class = 3  # upper_end_vertebra
+                    elif ann.is_lower_end:
+                        eff_class = 4  # lower_end_vertebra
+
                 # 4 corner points, normalized
                 coords = []
                 for p in ann.points:
                     coords.append(f"{p.x / w_img:.6f}")
                     coords.append(f"{p.y / h_img:.6f}")
 
-                line = f"{ann.class_id} {' '.join(coords)}\n"
+                line = f"{eff_class} {' '.join(coords)}\n"
                 f.write(line)
 
         return True
@@ -175,13 +212,21 @@ class YOLOConverter:
 
         with open(label_path, "w") as f:
             for ann in annotation.annotations:
+                # Determine effective class_id
+                eff_class = ann.class_id
+                if ann.class_id == 0:
+                    if ann.is_upper_end:
+                        eff_class = 3
+                    elif ann.is_lower_end:
+                        eff_class = 4
+
                 cx, cy, w, h, angle = ann.to_xywhr()
 
                 # Normalize angle to [-pi/4, pi/4)
                 angle = self._normalize_angle(angle)
 
                 line = (
-                    f"{ann.class_id} "
+                    f"{eff_class} "
                     f"{cx / w_img:.6f} {cy / h_img:.6f} "
                     f"{w / w_img:.6f} {h / h_img:.6f} "
                     f"{angle:.6f}\n"
