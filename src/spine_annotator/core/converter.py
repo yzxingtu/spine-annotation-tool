@@ -5,9 +5,6 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import cv2
-import numpy as np
-
 from .models import ImageAnnotation, OBBAnnotation, Point
 
 
@@ -21,14 +18,13 @@ class YOLOConverter:
             2: "normal spine",
         }
 
-    def load_dataset(self, dataset_root: str) -> Dict[str, ImageAnnotation]:
-        """Load all images and their annotations from a YOLO dataset.
+    def scan_dataset(self, dataset_root: str) -> List[dict]:
+        """Scan dataset and return list of image info (without loading pixels).
         
-        Looks for train/images, valid/images, test/images directories.
-        Returns dict mapping image_path -> ImageAnnotation.
+        Returns list of dicts with keys: image_path, label_path, width, height, has_labels
         """
         root = Path(dataset_root)
-        result = {}
+        result = []
 
         for split in ["train", "valid", "test"]:
             images_dir = root / split / "images"
@@ -41,25 +37,53 @@ class YOLOConverter:
                 img_abs = str(img_path.resolve())
                 label_path = labels_dir / (img_path.stem + ".txt")
 
-                img = cv2.imread(img_abs)
-                if img is None:
+                # Get image dimensions without loading full pixel data
+                from PIL import Image
+                try:
+                    with Image.open(img_abs) as img:
+                        w_img, h_img = img.size
+                except Exception:
                     continue
-                h_img, w_img = img.shape[:2]
 
-                annotation = ImageAnnotation(
-                    image_path=img_abs,
-                    image_width=w_img,
-                    image_height=h_img,
-                )
-
-                if label_path.exists():
-                    annotation.annotations = self._load_labels(
-                        label_path, w_img, h_img
-                    )
-
-                result[img_abs] = annotation
+                result.append({
+                    "image_path": img_abs,
+                    "label_path": str(label_path) if label_path.exists() else None,
+                    "width": w_img,
+                    "height": h_img,
+                    "has_labels": label_path.exists(),
+                })
 
         return result
+
+    def load_single(self, image_path: str, label_path: Optional[str],
+                    img_w: int, img_h: int) -> ImageAnnotation:
+        """Load annotations for a single image on demand."""
+        annotation = ImageAnnotation(
+            image_path=image_path,
+            image_width=img_w,
+            image_height=img_h,
+        )
+
+        if label_path and Path(label_path).exists():
+            annotation.annotations = self._load_labels(
+                Path(label_path), img_w, img_h
+            )
+
+        return annotation
+
+    def save_progress_cache(self, cache_path: str, progress: dict):
+        """Save progress cache to JSON file."""
+        import json
+        with open(cache_path, "w") as f:
+            json.dump(progress, f, indent=2)
+
+    def load_progress_cache(self, cache_path: str) -> dict:
+        """Load progress cache from JSON file."""
+        import json
+        if not Path(cache_path).exists():
+            return {}
+        with open(cache_path, "r") as f:
+            return json.load(f)
 
     def _load_labels(self, label_path: Path,
                      img_w: int, img_h: int) -> List[OBBAnnotation]:

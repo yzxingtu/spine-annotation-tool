@@ -1,21 +1,22 @@
 """Main application window for the spine annotation tool."""
 
+import json
 import math
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
-    QAction, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QShortcut, QSplitter,
-    QStatusBar, QToolBar, QVBoxLayout, QWidget,
+    QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+    QLabel, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QShortcut,
+    QStatusBar, QVBoxLayout, QWidget,
 )
 
 from ..core.converter import YOLOConverter
-from ..core.models import ImageAnnotation, OBBAnnotation
+from ..core.models import ImageAnnotation
 from .image_canvas import AnnotationCanvas
 
 
@@ -29,11 +30,16 @@ class MainWindow(QMainWindow):
 
         # Data
         self._converter = YOLOConverter()
-        self._dataset: Dict[str, ImageAnnotation] = {}
-        self._image_list: List[str] = []
+        self._image_infos: List[dict] = []  # scanned image metadata
         self._current_index: int = -1
         self._output_dir: Optional[str] = None
-        self._export_format: str = "yolov8_obb"  # or 'yolov8_xywhr'
+        self._export_format: str = "yolov8_obb"
+        self._dataset_root: Optional[str] = None
+        self._progress_cache_path: Optional[str] = None
+
+        # Current loaded annotation (only one at a time)
+        self._current_annotation: Optional[ImageAnnotation] = None
+        self._cache: dict = {}  # progress cache: {image_path: {"modified": bool, "saved": bool}}
 
         self._init_ui()
         self._init_shortcuts()
@@ -213,7 +219,7 @@ class MainWindow(QMainWindow):
     # --- Dataset Operations ---
 
     def _open_dataset(self):
-        """Open a YOLOv5/v8 dataset directory."""
+        """Open a YOLOv5/v8 dataset directory (scan only, no pixel loading)."""
         dir_path = QFileDialog.getExistingDirectory(
             self, "选择 YOLO 数据集目录",
             str(Path.home()),
@@ -221,25 +227,34 @@ class MainWindow(QMainWindow):
         if not dir_path:
             return
 
+        self._dataset_root = dir_path
+        self._progress_cache_path = os.path.join(dir_path, ".annotate_progress.json")
         self._dataset_path_label.setText(dir_path)
-        self.statusBar().showMessage("正在加载数据集...")
+        self.statusBar().showMessage("正在扫描数据集...")
 
-        self._dataset = self._converter.load_dataset(dir_path)
-        self._image_list = sorted(self._dataset.keys())
+        # Scan images (fast, no pixel loading)
+        self._image_infos = self._converter.scan_dataset(dir_path)
 
+        # Load progress cache
+        self._cache = self._converter.load_progress_cache(self._progress_cache_path)
+
+        # Populate list
         self._image_list_widget.clear()
-        for path in self._image_list:
-            name = Path(path).stem
+        for info in self._image_infos:
+            name = Path(info["image_path"]).stem
             item = QListWidgetItem(name)
+            # Mark if already processed
+            if self._cache.get(info["image_path"], {}).get("saved"):
+                item.setForeground(Qt.gray)
             self._image_list_widget.addItem(item)
 
-        self._progress_bar.setMaximum(len(self._image_list))
-        self._progress_bar.setValue(0)
+        self._progress_bar.setMaximum(len(self._image_infos))
+        self._update_progress()
 
-        self.statusBar().showMessage(f"已加载 {len(self._image_list)} 张图片")
+        self.statusBar().showMessage(f"已扫描 {len(self._image_infos)} 张图片")
         self._btn_save_all.setEnabled(True)
 
-        if self._image_list:
+        if self._image_infos:
             self._go_to_image(0)
 
     def _set_output_dir(self):
@@ -258,16 +273,24 @@ class MainWindow(QMainWindow):
     # --- Navigation ---
 
     def _go_to_image(self, index: int):
-        """Navigate to a specific image."""
-        if not (0 <= index < len(self._image_list)):
+        """Navigate to a specific image (lazy load on demand)."""
+        if not (0 <= index < len(self._image_infos)):
             return
 
+        # Auto-save previous if modified
+        if self._current_index >= 0 and self._current_annotation and self._current_annotation.modified:
+            self._save_current(silent=True)
+
         self._current_index = index
-        img_path = self._image_list[index]
-        annotation = self._dataset[img_path]
+        info = self._image_infos[index]
+
+        # Lazy load annotations for this image
+        self._current_annotation = self._converter.load_single(
+            info["image_path"], info["label_path"], info["width"], info["height"]
+        )
 
         self._image_list_widget.setCurrentRow(index)
-        self._canvas.load_image(img_path, annotation.annotations)
+        self._canvas.load_image(info["image_path"], self._current_annotation.annotations)
         self._update_status()
 
     def _prev_image(self):
@@ -281,9 +304,9 @@ class MainWindow(QMainWindow):
             self._go_to_image(row)
 
     def _select_prev_annotation(self):
-        if not self._image_list:
+        if not self._image_infos:
             return
-        ann = self._dataset.get(self._image_list[self._current_index])
+        ann = self._current_annotation
         if ann and ann.annotations:
             idx = self._canvas._current_selection - 1
             if idx < 0:
@@ -291,9 +314,9 @@ class MainWindow(QMainWindow):
             self._canvas.select_annotation(idx)
 
     def _select_next_annotation(self):
-        if not self._image_list:
+        if not self._image_infos:
             return
-        ann = self._dataset.get(self._image_list[self._current_index])
+        ann = self._current_annotation
         if ann and ann.annotations:
             idx = self._canvas._current_selection + 1
             if idx >= len(ann.annotations):
@@ -311,17 +334,12 @@ class MainWindow(QMainWindow):
 
     def _on_annotation_selected(self, index: int):
         """Update info panel when selection changes."""
-        if index < 0:
+        if index < 0 or not self._current_annotation:
             self._ann_info_label.setText("无选中")
             return
 
-        if not self._image_list:
-            return
-
-        img_path = self._image_list[self._current_index]
-        annotation = self._dataset[img_path]
-        if 0 <= index < len(annotation.annotations):
-            ann = annotation.annotations[index]
+        if 0 <= index < len(self._current_annotation.annotations):
+            ann = self._current_annotation.annotations[index]
             angle_deg = math.degrees(ann.angle)
             self._ann_info_label.setText(
                 f"类别: {ann.class_name} (ID={ann.class_id})\n"
@@ -336,12 +354,10 @@ class MainWindow(QMainWindow):
 
     def _on_annotation_modified(self):
         """Mark current image as modified."""
-        if not self._image_list:
-            return
-        img_path = self._image_list[self._current_index]
-        self._dataset[img_path].modified = True
-        self._on_annotation_selected(self._canvas._current_selection)
-        self._update_status()
+        if self._current_annotation:
+            self._current_annotation.modified = True
+            self._on_annotation_selected(self._canvas._current_selection)
+            self._update_status()
 
     def _on_angle_spin_changed(self, value: float):
         """Called when angle spinbox value changes (but not applied yet)."""
@@ -365,62 +381,87 @@ class MainWindow(QMainWindow):
 
     # --- Save Operations ---
 
-    def _save_current(self):
+    def _save_current(self, silent: bool = False):
         """Save current image annotations."""
-        if not self._image_list or not self._output_dir:
-            QMessageBox.warning(self, "提示", "请先设置输出目录")
+        if not self._image_infos or not self._output_dir:
+            if not silent:
+                QMessageBox.warning(self, "提示", "请先设置输出目录")
             return
 
-        img_path = self._image_list[self._current_index]
-        annotation = self._dataset[img_path]
+        if not self._current_annotation:
+            return
+
+        info = self._image_infos[self._current_index]
 
         if self._export_format == "yolov8_obb":
-            self._converter.save_obb_yolov8(annotation, self._output_dir, overwrite=True)
+            self._converter.save_obb_yolov8(self._current_annotation, self._output_dir, overwrite=True)
         else:
-            self._converter.save_obb_xywhr(annotation, self._output_dir, overwrite=True)
+            self._converter.save_obb_xywhr(self._current_annotation, self._output_dir, overwrite=True)
 
-        annotation.modified = False
-        self.statusBar().showMessage(f"已保存: {Path(img_path).name}")
+        # Update cache
+        img_path = info["image_path"]
+        self._cache[img_path] = {"modified": False, "saved": True}
+        self._current_annotation.modified = False
+
+        # Save cache to disk
+        self._converter.save_progress_cache(self._progress_cache_path, self._cache)
+
+        # Update UI
+        self._image_list_widget.item(self._current_index).setForeground(Qt.gray)
         self._update_progress()
 
+        if not silent:
+            self.statusBar().showMessage(f"已保存: {Path(img_path).name}")
+
     def _save_all(self):
-        """Export all annotations."""
+        """Export all images that have been processed."""
         if not self._output_dir:
             QMessageBox.warning(self, "提示", "请先设置输出目录")
             return
 
         count = 0
-        for img_path, annotation in self._dataset.items():
-            if self._export_format == "yolov8_obb":
-                saved = self._converter.save_obb_yolov8(
-                    annotation, self._output_dir, overwrite=True
-                )
-            else:
-                saved = self._converter.save_obb_xywhr(
-                    annotation, self._output_dir, overwrite=True
-                )
-            if saved:
+        for i, info in enumerate(self._image_infos):
+            # Only save if in cache or currently loaded
+            img_path = info["image_path"]
+            if img_path in self._cache or i == self._current_index:
+                # Load if not current
+                if i != self._current_index:
+                    ann = self._converter.load_single(
+                        info["image_path"], info["label_path"],
+                        info["width"], info["height"]
+                    )
+                else:
+                    ann = self._current_annotation
+
+                if self._export_format == "yolov8_obb":
+                    self._converter.save_obb_yolov8(ann, self._output_dir, overwrite=True)
+                else:
+                    self._converter.save_obb_xywhr(ann, self._output_dir, overwrite=True)
+
+                self._cache[img_path] = {"modified": False, "saved": True}
                 count += 1
 
-        self.statusBar().showMessage(f"已导出 {count} 个标注文件")
+        # Save cache
+        self._converter.save_progress_cache(self._progress_cache_path, self._cache)
         self._update_progress()
 
+        self.statusBar().showMessage(f"已导出 {count} 个标注文件")
+
     def _update_progress(self):
-        """Update progress bar based on modified count."""
-        modified = sum(1 for a in self._dataset.values() if a.modified)
-        total = len(self._dataset)
+        """Update progress bar based on saved count."""
+        saved = sum(1 for v in self._cache.values() if v.get("saved"))
+        total = len(self._image_infos)
         self._progress_bar.setMaximum(total)
-        self._progress_bar.setValue(total - modified)
+        self._progress_bar.setValue(saved)
 
     def _update_status(self):
         """Update status bar info."""
-        if not self._image_list:
+        if not self._image_infos or not self._current_annotation:
             return
-        img_path = self._image_list[self._current_index]
-        ann = self._dataset[img_path]
-        modified_str = " [已修改]" if ann.modified else ""
+        info = self._image_infos[self._current_index]
+        modified_str = " [已修改]" if self._current_annotation.modified else ""
         self._status_label.setText(
-            f"{self._current_index + 1}/{len(self._image_list)} | "
-            f"{Path(img_path).name} | "
-            f"{len(ann.annotations)} 个标注{modified_str}"
+            f"{self._current_index + 1}/{len(self._image_infos)} | "
+            f"{Path(info['image_path']).name} | "
+            f"{len(self._current_annotation.annotations)} 个标注{modified_str}"
         )
