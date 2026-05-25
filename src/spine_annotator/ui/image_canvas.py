@@ -3,7 +3,7 @@
 import math
 from typing import Callable, List, Optional, Tuple
 
-from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import (
     QBrush, QColor, QFont, QPen, QPixmap, QPolygonF, QWheelEvent,
 )
@@ -201,14 +201,21 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
 
         if brief:
             label_color = self._get_color()
-            font = QFont("Arial", 9, QFont.Bold)
+            font_size = 9.0
         else:
             label_color = SELECTED_COLOR
-            font = QFont("Arial", 10, QFont.Bold)
+            font_size = 10.0
+
+        # 字体大小和偏移量都反缩放，使 worldTransform 的缩放抵消后
+        # 在屏幕上保持恒定的像素大小和位置
+        font = QFont("Arial")
+        font.setPointSizeF(font_size * inv_s)
+        font.setBold(True)
+        offset = 8.0 * inv_s
 
         painter.save()
-        if s > 0:
-            painter.scale(inv_s, inv_s)
+        painter.setPen(QPen(label_color))
+        painter.setFont(font)
 
         if self.annotation.shape_type == "line":
             p0 = self.annotation.points[0]
@@ -218,9 +225,7 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
                 if v != 2:
                     v_text = {1: "遮挡", 0: "不可见"}.get(v, "")
                     label += f" [v={v} {v_text}]"
-            painter.setPen(QPen(label_color))
-            painter.setFont(font)
-            painter.drawText(QPointF(p0.x, p0.y - 8), label)
+            painter.drawText(QPointF(p0.x, p0.y - offset), label)
             painter.restore()
             return
 
@@ -234,10 +239,7 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
                 v_text = {1: "遮挡", 0: "不可见"}.get(v, "")
                 label += f" [v={v} {v_text}]"
 
-        painter.setPen(QPen(label_color))
-        painter.setFont(font)
-        painter.drawText(QPointF(p0.x, p0.y - 8), label)
-
+        painter.drawText(QPointF(p0.x, p0.y - offset), label)
         painter.restore()
 
     def hit_test_handle(self, scene_pos: QPointF) -> Tuple[str, int]:
@@ -588,11 +590,33 @@ class AnnotationCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
-        """Zoom with mouse wheel."""
-        factor = 1.15
-        if event.angleDelta().y() < 0:
-            factor = 1.0 / factor
+        """Zoom with mouse wheel or trackpad scroll."""
+        # 同时支持垂直滚轮和水平滚轮（某些触控板手势）
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta == 0:
+            return
+        factor = 1.15 if delta > 0 else 1.0 / 1.15
         self.scale(factor, factor)
+
+    def event(self, event):
+        """处理 macOS 触控板原生手势（捏合缩放、智能缩放）。"""
+        if event.type() == QEvent.NativeGesture:
+            gesture_type = event.gestureType()
+            if gesture_type == Qt.ZoomNativeGesture:
+                # macOS 触控板捏合：value 为增量缩放值
+                value = event.value()
+                if value != 0.0:
+                    # 限制单次缩放幅度，防止跳跃
+                    delta = max(-0.3, min(0.3, value))
+                    factor = 1.0 + delta
+                    self.scale(factor, factor)
+                return True
+            elif gesture_type == Qt.SmartZoomNativeGesture:
+                # macOS 触控板双指轻点两下：智能缩放 / 适配
+                if event.value() == 1.0:
+                    self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+                return True
+        return super().event(event)
 
     def mouseDoubleClickEvent(self, event):
         """双击标注时弹出椎骨编号修改请求。"""
