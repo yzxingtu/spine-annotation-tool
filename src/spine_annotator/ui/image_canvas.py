@@ -590,9 +590,18 @@ class AnnotationCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
-        """Zoom with mouse wheel or trackpad scroll."""
-        # 同时支持垂直滚轮和水平滚轮（某些触控板手势）
-        delta = event.angleDelta().y() or event.angleDelta().x()
+        """鼠标滚轮缩放 / 触控板双指滑动平移."""
+        pixel = event.pixelDelta()
+
+        # 优先 pixelDelta：macOS 触控板双指滑动会产生精确像素值
+        if pixel.x() != 0 or pixel.y() != 0:
+            # 双指滑动 → 平移画布（反向移动，使画布跟随手指）
+            self.translate(-pixel.x(), -pixel.y())
+            return
+
+        # 无 pixelDelta（鼠标滚轮）：用 angleDelta 缩放
+        angle = event.angleDelta()
+        delta = angle.y() or angle.x()
         if delta == 0:
             return
         factor = 1.15 if delta > 0 else 1.0 / 1.15
