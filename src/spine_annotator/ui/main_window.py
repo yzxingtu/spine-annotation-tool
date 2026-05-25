@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from .. import __version__
 from ..core.converter import YOLOConverter
 from ..core.models import (
     ImageAnnotation, OBBAnnotation, VERTEBRA_CLASSES,
@@ -32,7 +33,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("脊柱椎骨标注工具 - Spine Annotator")
+        self.setWindowTitle(f"脊柱椎骨标注工具 - Spine Annotator v{__version__}")
         self.resize(1400, 900)
 
         # 持久化设置（macOS 写到 ~/Library/Preferences、Linux 写 INI、Windows 写注册表）

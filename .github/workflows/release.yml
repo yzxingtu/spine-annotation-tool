@@ -1,0 +1,171 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------
+  # 校验 tag 与 pyproject 版本一致
+  # ---------------------------------------------------------------
+  verify-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 解析并校验版本
+        id: parse
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          from pathlib import Path
+
+          tag = os.environ["GIT_TAG"]
+          if not tag.startswith("v"):
+              sys.exit(f"Tag 必须以 v 开头, 当前: {tag}")
+          tag_version = tag[1:]
+
+          # pyproject.toml
+          pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+          m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
+          if not m:
+              sys.exit("无法在 pyproject.toml 中找到 version")
+          pkg_version = m.group(1)
+
+          # __init__.py
+          init_file = Path("src/spine_annotator/__init__.py").read_text(encoding="utf-8")
+          m2 = re.search(r'__version__\s*=\s*"([^"]+)"', init_file)
+          if not m2:
+              sys.exit("无法在 __init__.py 中找到 __version__")
+          init_version = m2.group(1)
+
+          if pkg_version != tag_version or init_version != tag_version:
+              sys.exit(
+                  f"版本不一致: tag={tag_version}, pyproject={pkg_version}, "
+                  f"__init__.py={init_version}"
+              )
+
+          print(f"版本检查通过: {tag_version}")
+          gh_out = os.environ.get("GITHUB_OUTPUT")
+          if gh_out:
+              with open(gh_out, "a", encoding="utf-8") as f:
+                  f.write(f"version={tag_version}\n")
+          PY
+
+  # ---------------------------------------------------------------
+  # 构建 Windows / macOS 版本
+  # ---------------------------------------------------------------
+  build:
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: SpineAnnotator-windows
+            ext: ".exe"
+          - os: macos-latest
+            artifact_name: SpineAnnotator-macos
+            ext: ".app"
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 升级 pip
+        run: python -m pip install --upgrade pip
+
+      - name: 安装项目依赖
+        run: |
+          pip install PyQt5>=5.15.0 numpy>=1.21.0 opencv-python-headless>=4.5.0 Pillow>=9.0.0
+          pip install pyinstaller>=6.0
+
+      # ---------- Windows 打包 ----------
+      - name: 打包 Windows (.exe)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --clean \
+            --name "SpineAnnotator" \
+            --windowed \
+            --onefile \
+            --paths src \
+            --collect-submodules spine_annotator \
+            main.py
+
+      - name: 重命名 Windows 产物
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist
+          mv SpineAnnotator.exe "SpineAnnotator-${{ needs.verify-version.outputs.version }}-windows.exe"
+          ls -la
+
+      # ---------- macOS 打包 ----------
+      - name: 打包 macOS (.app)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --clean \
+            --name "SpineAnnotator" \
+            --windowed \
+            --paths src \
+            --collect-submodules spine_annotator \
+            main.py
+
+      - name: 压缩 macOS .app
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          zip -ry "SpineAnnotator-${{ needs.verify-version.outputs.version }}-macos.zip" SpineAnnotator.app
+          ls -la
+
+      # ---------- 上传 artifact ----------
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/SpineAnnotator-*-windows.exe
+            dist/SpineAnnotator-*-macos.zip
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------
+  # 创建 GitHub Release 并附加产物
+  # ---------------------------------------------------------------
+  release:
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有 artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 列出产物
+        run: ls -R artifacts
+
+      - name: 创建/更新 Release 并上传资产
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/SpineAnnotator-*-windows.exe
+            artifacts/**/SpineAnnotator-*-macos.zip
+          generate_release_notes: true
+          name: "Spine Annotator v${{ needs.verify-version.outputs.version }}"
