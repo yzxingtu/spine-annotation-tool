@@ -256,8 +256,13 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         Returns: ('corner', index), ('rotate', -1), or ('none', -1)
 
         S1 (class_id=18) 允许 corner hit（调整宽高），但不响应 rotate hit。
+
+        命中阈值随视图缩放反向调整，与手柄视觉大小保持一致，
+        避免图片放大后点击空白处误中手柄。
         """
-        threshold = HANDLE_SIZE + 3
+        s = self._get_view_scale()
+        inv_s = 1.0 / s if s > 0 else 1.0
+        threshold = (HANDLE_SIZE + 3) * inv_s
 
         # Check rotation handle first (S1 不参与，_rotate_handle 为 None)
         if self._rotate_handle:
