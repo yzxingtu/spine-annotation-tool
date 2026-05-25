@@ -1118,6 +1118,20 @@ class MainWindow(QMainWindow):
 
         info = self._image_infos[self._current_index]
 
+        # 校验 S1 数量：每张图片只能有 0-1 个 S1
+        s1_count = sum(
+            1 for ann in self._current_annotation.annotations
+            if ann.class_id == 18
+        )
+        if s1_count > 1:
+            if not silent:
+                QMessageBox.warning(
+                    self, "保存失败",
+                    f"当前图片存在 {s1_count} 个 S1 标注。\n"
+                    "每张图片最多只能有 1 个 S1（髅椎）标注，请删除多余的 S1。"
+                )
+            return
+
         # Compute split-aware output directory
         split = info.get("split", "")
         if split:

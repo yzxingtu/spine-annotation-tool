@@ -396,9 +396,16 @@ class AnnotationCanvas(QGraphicsView):
         return None
 
     def rotate_selected(self, angle_deg: float):
-        """Rotate the selected annotation by given degrees."""
+        """Rotate the selected annotation by given degrees.
+
+        S1 (骥椎, class_id=18) 为 line 类型，角度永远锁定为 0，不允许旋转。
+        """
         ann = self.get_selected_annotation()
         if ann is None:
+            return
+
+        # S1 角度锁定
+        if ann.class_id == 18:
             return
 
         ann.rotate(math.radians(angle_deg))

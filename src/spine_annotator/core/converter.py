@@ -286,14 +286,20 @@ class YOLOConverter:
 
     def _load_labels(self, label_path: Path,
                      img_w: int, img_h: int) -> List[OBBAnnotation]:
-        """Load YOLOv5 format labels and convert to OBB annotations.
+        """Load labels from YOLO format file (auto-detect AABB / OBB / pose).
+
+        支持的格式：
+        - AABB (5 fields): class_id cx cy w h  →  旧 YOLOv5 格式
+        - OBB  (9 fields): class_id x1 y1 x2 y2 x3 y3 x4 y4  →  YOLOv8-OBB
+        - Pose (17 fields): class_id cx cy w h x1 y1 v1 x2 y2 v2 x3 y3 v3 x4 y4 v4
 
         旧数据集兼容：
         - class_id 1/2 (脊柱外框) 完全跳过
-        - class_id 0 (泛化"Vertebra") 按 center.y 从上到下自动编号为 C7→T1→...→S1
+        - class_id 0 (泛化"Vertebra") 按 center.y 从上到下自动编号
         - 新数据集 (class_id 0~18 对应 C7~S1) 直接加载
         """
-        raw_entries: list[tuple[int, float, float, float, float]] = []
+        raw_aabb_entries: list[tuple[int, float, float, float, float]] = []
+        raw_obb_entries: list[tuple[int, List[Point], str]] = []
 
         with open(label_path, "r") as f:
             for line in f:
@@ -302,51 +308,124 @@ class YOLOConverter:
                     continue
 
                 class_id = int(parts[0])
-                cx_norm = float(parts[1])
-                cy_norm = float(parts[2])
-                w_norm = float(parts[3])
-                h_norm = float(parts[4])
 
-                # 彻底跳过脊柱外框 (旧 class_id 1/2)
+                # 跳过脊柱外框
                 if class_id in (1, 2):
                     continue
-                # 跳过其他未知旧类别
                 category = get_vertebra_category(class_id)
                 if category is None and class_id != 0:
                     continue
 
-                cx = cx_norm * img_w
-                cy = cy_norm * img_h
-                w = w_norm * img_w
-                h = h_norm * img_h
+                if len(parts) == 5:
+                    # AABB 格式: class_id cx cy w h
+                    cx_norm = float(parts[1])
+                    cy_norm = float(parts[2])
+                    w_norm = float(parts[3])
+                    h_norm = float(parts[4])
+                    raw_aabb_entries.append((
+                        class_id,
+                        cx_norm * img_w, cy_norm * img_h,
+                        w_norm * img_w, h_norm * img_h,
+                    ))
 
-                raw_entries.append((class_id, cx, cy, w, h))
+                elif len(parts) == 9:
+                    # OBB 格式: class_id x1 y1 x2 y2 x3 y3 x4 y4
+                    coords = [float(p) for p in parts[1:9]]
+                    # 检测是否为退化矩形（line 类型，底边=顶边）
+                    is_line = self._is_degenerate_obb(coords)
+                    points = [
+                        Point(coords[0] * img_w, coords[1] * img_h),
+                        Point(coords[2] * img_w, coords[3] * img_h),
+                        Point(coords[4] * img_w, coords[5] * img_h),
+                        Point(coords[6] * img_w, coords[7] * img_h),
+                    ]
+                    if is_line:
+                        # 仅保留前两个端点，重建为 line 标注
+                        raw_obb_entries.append((
+                            class_id,
+                            [points[0], points[1]],
+                            "line",
+                        ))
+                    else:
+                        raw_obb_entries.append((
+                            class_id, points, "obb",
+                        ))
 
-        # 判断是否为旧格式 (全部为 class_id=0)
-        is_legacy = all(entry[0] == 0 for entry in raw_entries) if raw_entries else False
+                elif len(parts) == 17:
+                    # Pose 格式: cx cy w h x1 y1 v1 x2 y2 v2 x3 y3 v3 x4 y4 v4
+                    v3 = int(float(parts[14]))
+                    v4 = int(float(parts[17]))
+                    # 检测是否为 line（底部两点不可见）
+                    is_line = (v3 == 0 and v4 == 0)
+                    x1 = float(parts[5]) * img_w
+                    y1 = float(parts[6]) * img_h
+                    x2 = float(parts[8]) * img_w
+                    y2 = float(parts[9]) * img_h
+                    x3 = float(parts[11]) * img_w
+                    y3 = float(parts[12]) * img_h
+                    x4 = float(parts[14]) * img_w
+                    y4 = float(parts[15]) * img_h
+                    if is_line:
+                        raw_obb_entries.append((
+                            class_id,
+                            [Point(x1, y1), Point(x2, y2)],
+                            "line",
+                        ))
+                    else:
+                        raw_obb_entries.append((
+                            class_id,
+                            [Point(x1, y1), Point(x2, y2), Point(x3, y3), Point(x4, y4)],
+                            "obb",
+                        ))
 
+        # 合并入参：如果文件中同时有 AABB 和 OBB/pose 行，以 OBB/pose 为主
         annotations: List[OBBAnnotation] = []
 
-        if is_legacy:
-            # 旧格式：按 center.y 从上到下排序，自动编号 C7(0), T1(1), T2(2), ... S1(18)
-            sorted_entries = sorted(raw_entries, key=lambda e: e[2])  # sort by cy
-            for i, (class_id, cx, cy, w, h) in enumerate(sorted_entries):
-                if i < len(VERTEBRA_CLASSES):
-                    auto_class_id = i
-                    auto_class_name = VERTEBRA_CLASSES[i]
-                else:
-                    auto_class_id = i
-                    auto_class_name = f"V{i}"
-                ann = OBBAnnotation.from_aabb(auto_class_id, auto_class_name, cx, cy, w, h)
-                annotations.append(ann)
-        else:
-            # 新格式：直接使用 class_id
-            for class_id, cx, cy, w, h in raw_entries:
-                class_name = VERTEBRA_CLASSES.get(class_id, f"class_{class_id}")
-                ann = OBBAnnotation.from_aabb(class_id, class_name, cx, cy, w, h)
-                annotations.append(ann)
+        # 处理 AABB 条目
+        if raw_aabb_entries:
+            is_legacy = all(e[0] == 0 for e in raw_aabb_entries)
+            if is_legacy:
+                sorted_entries = sorted(raw_aabb_entries, key=lambda e: e[2])
+                for i, (class_id, cx, cy, w, h) in enumerate(sorted_entries):
+                    if i < len(VERTEBRA_CLASSES):
+                        auto_class_id = i
+                        auto_class_name = VERTEBRA_CLASSES[i]
+                    else:
+                        auto_class_id = i
+                        auto_class_name = f"V{i}"
+                    ann = OBBAnnotation.from_aabb(auto_class_id, auto_class_name, cx, cy, w, h)
+                    annotations.append(ann)
+            else:
+                for class_id, cx, cy, w, h in raw_aabb_entries:
+                    class_name = VERTEBRA_CLASSES.get(class_id, f"class_{class_id}")
+                    ann = OBBAnnotation.from_aabb(class_id, class_name, cx, cy, w, h)
+                    annotations.append(ann)
+
+        # 处理 OBB/pose 条目
+        for class_id, points, shape_type in raw_obb_entries:
+            class_name = VERTEBRA_CLASSES.get(class_id, f"class_{class_id}")
+            if shape_type == "line" and len(points) == 2:
+                ann = OBBAnnotation.from_line(class_id, class_name, points[0], points[1])
+            else:
+                ann = OBBAnnotation(class_id, class_name, points)
+                ann._update_geometry()
+            annotations.append(ann)
 
         return annotations
+
+    def _is_degenerate_obb(self, coords: List[float]) -> bool:
+        """检测 OBB 坐标是否为退化矩形（底边与顶边重合，即 line 类型）。
+
+        保存时 line 存为: p0, p1, p1, p0 → 检测 x1≈x4, y1≈y4, x2≈x3, y2≈y3
+        """
+        if len(coords) != 8:
+            return False
+        x1, y1, x2, y2, x3, y3, x4, y4 = coords
+        eps = 1e-5
+        return (
+            abs(x1 - x4) < eps and abs(y1 - y4) < eps and
+            abs(x2 - x3) < eps and abs(y2 - y3) < eps
+        )
 
     def save_obb_yolov8(self, annotation: ImageAnnotation,
                         output_dir: str, overwrite: bool = False):
