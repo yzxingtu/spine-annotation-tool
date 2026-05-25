@@ -148,14 +148,8 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
     def _draw_handles(self, painter):
         """Draw corner handles and rotation handle (view-scale independent).
 
-        S1 (class_id=18) 类别锁定几何：不绘制任何手柄，仅允许整体拖动。
+        S1 (class_id=18)：允许角点拖动调整宽高，但不绘制旋转手柄（锁定轴对齐）。
         """
-        # S1 不允许角点/旋转手柄调整
-        if self.annotation.class_id == 18:
-            self._handles = []
-            self._rotate_handle = None
-            return
-
         s = self._get_view_scale()
         inv_s = 1.0 / s if s > 0 else 1.0
 
@@ -174,12 +168,17 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
             self._rotate_handle = None
             return
 
-        # OBB 标注：4 个角点手柄 + 旋转手柄
+        # OBB 标注：4 个角点手柄
         self._handles = []
         for p in self.annotation.points:
             center = QPointF(p.x, p.y)
             self._handles.append(center)
             painter.drawEllipse(center, HANDLE_SIZE * inv_s, HANDLE_SIZE * inv_s)
+
+        # S1 不绘制旋转手柄（角度锁定为 0）
+        if self.annotation.class_id == 18:
+            self._rotate_handle = None
+            return
 
         # Rotation handle (above top edge midpoint)
         p0 = self.annotation.points[0]
@@ -256,15 +255,11 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
 
         Returns: ('corner', index), ('rotate', -1), or ('none', -1)
 
-        S1 (class_id=18) 不响应任何手柄 hit，防止拖动角点或旋转。
+        S1 (class_id=18) 允许 corner hit（调整宽高），但不响应 rotate hit。
         """
-        # S1 跳过手柄检测
-        if self.annotation.class_id == 18:
-            return ("none", -1)
-
         threshold = HANDLE_SIZE + 3
 
-        # Check rotation handle first
+        # Check rotation handle first (S1 不参与，_rotate_handle 为 None)
         if self._rotate_handle:
             if (scene_pos - self._rotate_handle).manhattanLength() < threshold * 2:
                 return ("rotate", -1)
@@ -565,8 +560,30 @@ class AnnotationCanvas(QGraphicsView):
 
         if self._drag_mode == "corner" and 0 <= self._current_selection < len(self._obb_items):
             item = self._obb_items[self._current_selection]
-            new_point = Point(scene_pos.x(), scene_pos.y())
-            item.annotation.move_corner(self._drag_corner_index, new_point)
+            ann = item.annotation
+            if ann.class_id == 18 and ann.shape_type != "line" and len(ann.points) == 4:
+                # S1 轴对齐拉伸：对角点保持不动，重建 4 个 corners 保持矩形
+                idx = self._drag_corner_index
+                opp = ann.points[(idx + 2) % 4]
+                x_min = min(scene_pos.x(), opp.x)
+                x_max = max(scene_pos.x(), opp.x)
+                y_min = min(scene_pos.y(), opp.y)
+                y_max = max(scene_pos.y(), opp.y)
+                # 防止退化
+                if x_max - x_min < 1.0:
+                    x_max = x_min + 1.0
+                if y_max - y_min < 1.0:
+                    y_max = y_min + 1.0
+                ann.points = [
+                    Point(x_min, y_min),  # TL
+                    Point(x_max, y_min),  # TR
+                    Point(x_max, y_max),  # BR
+                    Point(x_min, y_max),  # BL
+                ]
+                ann._update_geometry()
+            else:
+                new_point = Point(scene_pos.x(), scene_pos.y())
+                ann.move_corner(self._drag_corner_index, new_point)
             item._update_polygon()
             self.annotation_modified.emit()
 
