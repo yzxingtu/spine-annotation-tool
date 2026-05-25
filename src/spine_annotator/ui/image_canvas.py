@@ -599,15 +599,19 @@ class AnnotationCanvas(QGraphicsView):
     def wheelEvent(self, event: QWheelEvent):
         """鼠标滚轮缩放 / 触控板双指滑动平移."""
         pixel = event.pixelDelta()
+        angle = event.angleDelta()
 
-        # 优先 pixelDelta：macOS 触控板双指滑动会产生精确像素值
-        if pixel.x() != 0 or pixel.y() != 0:
-            # 双指滑动 → 平移画布（反向移动，使画布跟随手指）
+        # 触控板双指滑动：pixelDelta 非零且 angleDelta 较小（通常 |y| < 15）
+        # 鼠标滚轮：angleDelta 较大（通常 |y| ≥ 120），pixelDelta 可能也有值
+        is_trackpad_scroll = (
+            (pixel.x() != 0 or pixel.y() != 0) and
+            abs(angle.y()) < 15 and abs(angle.x()) < 15
+        )
+        if is_trackpad_scroll:
             self.translate(-pixel.x(), -pixel.y())
             return
 
-        # 无 pixelDelta（鼠标滚轮）：用 angleDelta 缩放
-        angle = event.angleDelta()
+        # 鼠标滚轮缩放（用 angleDelta）
         delta = angle.y() or angle.x()
         if delta == 0:
             return
