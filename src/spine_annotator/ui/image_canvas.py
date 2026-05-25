@@ -122,6 +122,9 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         if self._selected:
             self._draw_handles(painter)
             self._draw_label(painter)
+        else:
+            # 未选中也显示椎骨编号，便于快速核对准确性
+            self._draw_label(painter, brief=True)
 
     def _draw_handles(self, painter):
         """Draw corner handles and rotation handle."""
@@ -165,29 +168,44 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         painter.setBrush(QBrush(QColor(0, 200, 255, 180)))
         painter.drawEllipse(rotate_pos, HANDLE_SIZE + 1, HANDLE_SIZE + 1)
 
-    def _draw_label(self, painter):
-        """Draw class name label above the box."""
+    def _draw_label(self, painter, brief: bool = False):
+        """Draw class name label above the box.
+
+        brief=True 时仅显示椎骨编号（未选中状态），使用该椎骨分类颜色；
+        brief=False 时显示完整信息（选中状态），使用 SELECTED_COLOR。
+        """
+        if brief:
+            label_color = self._get_color()
+            font = QFont("Arial", 9, QFont.Bold)
+        else:
+            label_color = SELECTED_COLOR
+            font = QFont("Arial", 10, QFont.Bold)
+
         if self.annotation.shape_type == "line":
             p0 = self.annotation.points[0]
             label = f"{self.annotation.class_name}"
-            v = int(getattr(self.annotation, "keypoint_visibility", 2))
-            if v != 2:
-                v_text = {1: "遮挡", 0: "不可见"}.get(v, "")
-                label += f" [v={v} {v_text}]"
-            painter.setPen(QPen(SELECTED_COLOR))
-            painter.setFont(QFont("Arial", 10, QFont.Bold))
+            if not brief:
+                v = int(getattr(self.annotation, "keypoint_visibility", 2))
+                if v != 2:
+                    v_text = {1: "遮挡", 0: "不可见"}.get(v, "")
+                    label += f" [v={v} {v_text}]"
+            painter.setPen(QPen(label_color))
+            painter.setFont(font)
             painter.drawText(QPointF(p0.x, p0.y - 8), label)
             return
 
         p0 = self.annotation.points[0]
-        label = f"{self.annotation.class_name} ({math.degrees(self.annotation.angle):.1f}°)"
-        v = int(getattr(self.annotation, "keypoint_visibility", 2))
-        if v != 2:
-            v_text = {1: "遮挡", 0: "不可见"}.get(v, "")
-            label += f" [v={v} {v_text}]"
+        if brief:
+            label = f"{self.annotation.class_name}"
+        else:
+            label = f"{self.annotation.class_name} ({math.degrees(self.annotation.angle):.1f}°)"
+            v = int(getattr(self.annotation, "keypoint_visibility", 2))
+            if v != 2:
+                v_text = {1: "遮挡", 0: "不可见"}.get(v, "")
+                label += f" [v={v} {v_text}]"
 
-        painter.setPen(QPen(SELECTED_COLOR))
-        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        painter.setPen(QPen(label_color))
+        painter.setFont(font)
         painter.drawText(QPointF(p0.x, p0.y - 8), label)
 
     def hit_test_handle(self, scene_pos: QPointF) -> Tuple[str, int]:
