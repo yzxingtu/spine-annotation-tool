@@ -2,6 +2,6 @@
 
 # 全局版本号：唯一来源（Single Source of Truth）
 # 发布脚本会自动同步此处和 pyproject.toml
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]
