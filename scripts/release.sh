@@ -114,20 +114,20 @@ sed_inplace() {
 }
 
 # pyproject.toml: version = "x.y.z"
-if ! grep -qE '^version\s*=' "${PYPROJECT_FILE}"; then
+if ! grep -qE '^version[[:space:]]*=' "${PYPROJECT_FILE}"; then
   fatal "${PYPROJECT_FILE} 中未找到 version 字段"
 fi
-sed_inplace -E "s|^version\s*=\s*\".*\"|version = \"${NEW_VERSION}\"|" "${PYPROJECT_FILE}"
+sed_inplace -E "s|^version[[:space:]]*=[[:space:]]*\".*\"|version = \"${NEW_VERSION}\"|" "${PYPROJECT_FILE}"
 
 # __init__.py: __version__ = "x.y.z"
-if ! grep -qE '__version__\s*=' "${INIT_FILE}"; then
+if ! grep -qE '__version__[[:space:]]*=' "${INIT_FILE}"; then
   fatal "${INIT_FILE} 中未找到 __version__ 字段"
 fi
-sed_inplace -E "s|__version__\s*=\s*\".*\"|__version__ = \"${NEW_VERSION}\"|" "${INIT_FILE}"
+sed_inplace -E "s|__version__[[:space:]]*=[[:space:]]*\".*\"|__version__ = \"${NEW_VERSION}\"|" "${INIT_FILE}"
 
 # 校验
-PYPROJECT_VERSION=$(grep -E '^version\s*=' "${PYPROJECT_FILE}" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-INIT_VERSION=$(grep -E '__version__\s*=' "${INIT_FILE}" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+PYPROJECT_VERSION=$(grep -E '^version[[:space:]]*=' "${PYPROJECT_FILE}" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+INIT_VERSION=$(grep -E '__version__[[:space:]]*=' "${INIT_FILE}" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [[ "${PYPROJECT_VERSION}" != "${NEW_VERSION}" || "${INIT_VERSION}" != "${NEW_VERSION}" ]]; then
   fatal "版本号写入校验失败: pyproject=${PYPROJECT_VERSION}, init=${INIT_VERSION}"
