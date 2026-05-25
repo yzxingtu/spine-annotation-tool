@@ -222,9 +222,9 @@ class YOLOConverter:
 
         try:
             if shape_type == "line" and len(pts) == 2:
-                p0 = Point(float(pts[0][0]), float(pts[0][1]))
-                p1 = Point(float(pts[1][0]), float(pts[1][1]))
-                ann = OBBAnnotation.from_line(class_id, class_name, p0, p1)
+                p0x, p0y = float(pts[0][0]), float(pts[0][1])
+                p1x, p1y = float(pts[1][0]), float(pts[1][1])
+                ann = OBBAnnotation.from_line(class_id, class_name, p0x, p0y, p1x, p1y)
             elif len(pts) == 4:
                 points = [Point(float(p[0]), float(p[1])) for p in pts]
                 ann = OBBAnnotation(class_id, class_name, points)
@@ -352,9 +352,12 @@ class YOLOConverter:
                         ))
 
                 elif len(parts) == 17:
-                    # Pose 格式: cx cy w h x1 y1 v1 x2 y2 v2 x3 y3 v3 x4 y4 v4
-                    v3 = int(float(parts[14]))
-                    v4 = int(float(parts[17]))
+                    # Pose 格式: class_id cx cy w h x1 y1 v1 x2 y2 v2 x3 y3 v3 x4 y4 v4
+                    # 字段索引：
+                    #   0      1  2  3 4   5  6  7   8  9  10  11 12 13  14 15 16
+                    #   class  cx cy w h   x1 y1 v1  x2 y2 v2  x3 y3 v3  x4 y4 v4
+                    v3 = int(float(parts[13]))
+                    v4 = int(float(parts[16]))
                     # 检测是否为 line（底部两点不可见）
                     is_line = (v3 == 0 and v4 == 0)
                     x1 = float(parts[5]) * img_w
@@ -405,7 +408,10 @@ class YOLOConverter:
         for class_id, points, shape_type in raw_obb_entries:
             class_name = VERTEBRA_CLASSES.get(class_id, f"class_{class_id}")
             if shape_type == "line" and len(points) == 2:
-                ann = OBBAnnotation.from_line(class_id, class_name, points[0], points[1])
+                ann = OBBAnnotation.from_line(
+                    class_id, class_name,
+                    points[0].x, points[0].y, points[1].x, points[1].y,
+                )
             else:
                 ann = OBBAnnotation(class_id, class_name, points)
                 ann._update_geometry()

@@ -171,12 +171,6 @@ class MainWindow(QMainWindow):
         self._btn_draw_rect.clicked.connect(lambda: self._toggle_draw_mode("rect"))
         draw_row.addWidget(self._btn_draw_rect)
 
-        self._btn_draw_line = QPushButton("直线")
-        self._btn_draw_line.setCheckable(True)
-        self._btn_draw_line.setToolTip("拖拽绘制直线椎骨标注 (S1顶部)；绘制完成后弹窗选择椎骨编号")
-        self._btn_draw_line.clicked.connect(lambda: self._toggle_draw_mode("line"))
-        draw_row.addWidget(self._btn_draw_line)
-
         right_layout.addLayout(draw_row)
 
         draw_hint = QLabel("提示: 按 Esc 退出绘制；绘制完成后会弹出椎骨编号选择框")
@@ -933,27 +927,24 @@ class MainWindow(QMainWindow):
     
     def _toggle_draw_mode(self, shape: str):
         """切换绘制模式；再次点击同一按钮则退出绘制。
-    
-        方案 B：不预设椎骨类别，绘制完成后统一弹窗选择。
+
+        所有标注（含 S1）统一使用矩形绘制；S1 训练时直接以 OBB 形态导出。
         """
         # 重复点击当前模式按钮→退出绘制
         if self._current_draw_shape == shape and shape != "none":
             shape = "none"
-    
+
         self._current_draw_shape = shape
         self._current_draw_class_id = None  # 不预设
-    
+
         # 同步按钮选中状态
         self._btn_draw_rect.setChecked(shape == "rect")
-        self._btn_draw_line.setChecked(shape == "line")
-    
+
         # 设置画布绘制模式（class_id=None，绘制完成后由弹窗选择）
         if shape == "none":
             self._canvas.set_draw_mode(AnnotationCanvas.DRAW_NONE)
         elif shape == "rect":
             self._canvas.set_draw_mode(AnnotationCanvas.DRAW_RECT, class_id=None)
-        elif shape == "line":
-            self._canvas.set_draw_mode(AnnotationCanvas.DRAW_LINE, class_id=None)
 
     def _on_annotation_created(self, annotation: OBBAnnotation):
         """画布上绘制完成后回调，将标注添加到当前图片。"""

@@ -146,7 +146,16 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
         return math.hypot(t.m11(), t.m12()) or 1.0
 
     def _draw_handles(self, painter):
-        """Draw corner handles and rotation handle (view-scale independent)."""
+        """Draw corner handles and rotation handle (view-scale independent).
+
+        S1 (class_id=18) 类别锁定几何：不绘制任何手柄，仅允许整体拖动。
+        """
+        # S1 不允许角点/旋转手柄调整
+        if self.annotation.class_id == 18:
+            self._handles = []
+            self._rotate_handle = None
+            return
+
         s = self._get_view_scale()
         inv_s = 1.0 / s if s > 0 else 1.0
 
@@ -244,9 +253,15 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
 
     def hit_test_handle(self, scene_pos: QPointF) -> Tuple[str, int]:
         """Test if scene position hits a handle.
-        
+
         Returns: ('corner', index), ('rotate', -1), or ('none', -1)
+
+        S1 (class_id=18) 不响应任何手柄 hit，防止拖动角点或旋转。
         """
+        # S1 跳过手柄检测
+        if self.annotation.class_id == 18:
+            return ("none", -1)
+
         threshold = HANDLE_SIZE + 3
 
         # Check rotation handle first
