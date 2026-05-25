@@ -990,7 +990,16 @@ class MainWindow(QMainWindow):
 
         # 如果未预设椎骨类别，弹出选择对话框
         if annotation.class_id < 0 or not annotation.class_name:
-            class_id = self._prompt_vertebra_selection()
+            used = {
+                a.class_id
+                for a in self._current_annotation.annotations
+                if a.class_id is not None and a.class_id >= 0
+            }
+            suggested = self._suggest_next_class_id(used)
+            class_id = self._prompt_vertebra_selection(
+                used_class_ids=used,
+                suggested_class_id=suggested,
+            )
             if class_id is None:
                 return  # 用户取消
             annotation.class_id = class_id
@@ -1017,38 +1026,102 @@ class MainWindow(QMainWindow):
         if self._current_index >= 0:
             self._apply_item_style(self._current_index)
 
-    def _prompt_vertebra_selection(self, current_class_id: Optional[int] = None) -> Optional[int]:
-        """弹出椎骨类型选择对话框，返回 class_id 或 None(取消)。"""
-        categories = [
-            "颈椎 (C)",
-            "  C7",
-            "胸椎 (T)",
-            "  T1", "  T2", "  T3", "  T4", "  T5", "  T6",
-            "  T7", "  T8", "  T9", "  T10", "  T11", "  T12",
-            "腰椎 (L)",
-            "  L1", "  L2", "  L3", "  L4", "  L5",
-            "骶椎 (S)",
-            "  S1",
-        ]
-        # 预选当前椎骨
+    @staticmethod
+    def _suggest_next_class_id(used_class_ids: set) -> int:
+        """根据当前图已使用的编号推导下一个候选 class_id。
+    
+        规则：按脊柱从上到下（C7→T1...→L5→S1）递增，返回 max(used)+1；
+        空集返回 C7(0)；均已到达 S1(18) 仍返回 18（允许用户仍可反复选，
+        重复检查交由 _prompt_vertebra_selection 提示）。
+        """
+        if not used_class_ids:
+            return 0  # C7
+        max_used = max(used_class_ids)
+        if max_used >= 18:
+            return 18  # S1 到顶
+        return max_used + 1
+    
+    def _prompt_vertebra_selection(
+        self,
+        current_class_id: Optional[int] = None,
+        used_class_ids: Optional[set] = None,
+        suggested_class_id: Optional[int] = None,
+    ) -> Optional[int]:
+        """弹出椎骨类型选择对话框，返回 class_id 或 None(取消)。
+    
+        参数：
+          - current_class_id: 改编号场景下当前标注自身的编号（不视为冲突）
+          - used_class_ids:    本图已占用的编号集合，冲突项会带 "(已用)"标记
+          - suggested_class_id: 智能预选编号；未传时回退到 current_class_id。
+        选中已占用编号时会弹二次确认；选中分组标题则要求重选。
+        """
+        used = set(used_class_ids) if used_class_ids else set()
+        # 改编号场景：自身编号不计作冲突
+        conflict_ids = {cid for cid in used if cid != current_class_id}
+    
+        items: List[str] = []
+        item_class_ids: List[Optional[int]] = []
+    
+        def _add(label: str, cid: Optional[int]) -> None:
+            if cid is not None and cid in conflict_ids:
+                label = f"{label} (已用)"
+            items.append(label)
+            item_class_ids.append(cid)
+    
+        _add("颈椎 (C)", None)
+        _add("  C7", 0)
+        _add("胸椎 (T)", None)
+        for i in range(1, 13):
+            _add(f"  T{i}", i)
+        _add("腰椎 (L)", None)
+        for i in range(1, 6):
+            _add(f"  L{i}", 12 + i)
+        _add("骶椎 (S)", None)
+        _add("  S1", 18)
+    
+        # 预选索引：优先 suggested，其次 current
+        target_cid = suggested_class_id if suggested_class_id is not None else current_class_id
         default_idx = 0
-        if current_class_id is not None:
-            current_name = VERTEBRA_CLASSES.get(current_class_id, "")
-            for i, cat in enumerate(categories):
-                if cat.strip() == current_name:
+        if target_cid is not None:
+            for i, cid in enumerate(item_class_ids):
+                if cid == target_cid:
                     default_idx = i
                     break
-
-        name, ok = QInputDialog.getItem(
-            self, "选择椎骨类型", "请选择标注的椎骨:", categories, default_idx, False
-        )
-        if not ok:
-            return None
-        name = name.strip()
-        class_id = get_vertebra_class_id(name)
-        if class_id is not None:
+    
+        while True:
+            name, ok = QInputDialog.getItem(
+                self, "选择椎骨类型", "请选择标注的椎骨:",
+                items, default_idx, False,
+            )
+            if not ok:
+                return None
+            try:
+                sel_idx = items.index(name)
+            except ValueError:
+                return None
+            class_id = item_class_ids[sel_idx]
+            # 选中分组标题→要求重选
+            if class_id is None:
+                QMessageBox.information(
+                    self, "请选择具体编号",
+                    "请选择具体的椎骨编号（如 C7、T3、L5 等）。",
+                )
+                default_idx = sel_idx
+                continue
+            # 重复性检查
+            if class_id in conflict_ids:
+                reply = QMessageBox.warning(
+                    self, "编号已被使用",
+                    f"当前图中已存在编号为 {VERTEBRA_CLASSES[class_id]} 的标注。\n\n"
+                    "椎骨编号应唯一，重复使用会导致训练数据异常。\n"
+                    "是否仍要使用该编号？（建议重选）",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    default_idx = sel_idx
+                    continue
             return class_id
-        return None
 
     def _delete_selected_annotation(self):
         """删除当前选中的标注。"""
@@ -1109,7 +1182,17 @@ class MainWindow(QMainWindow):
 
     def _relabel_annotation(self, ann: OBBAnnotation):
         """弹出椎骨编号选择对话框并更改标注编号。"""
-        new_class_id = self._prompt_vertebra_selection(current_class_id=ann.class_id)
+        used = set()
+        if self._current_annotation:
+            used = {
+                a.class_id
+                for a in self._current_annotation.annotations
+                if a.class_id is not None and a.class_id >= 0
+            }
+        new_class_id = self._prompt_vertebra_selection(
+            current_class_id=ann.class_id,
+            used_class_ids=used,
+        )
         if new_class_id is None or new_class_id == ann.class_id:
             return  # 取消或未变
 
