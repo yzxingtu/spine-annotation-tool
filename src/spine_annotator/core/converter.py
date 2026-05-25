@@ -603,7 +603,14 @@ class YOLOConverter:
           取自 OBBAnnotation.keypoint_visibility（对该标注 4 个点统一生效），默认 2
         
         Line 类型标注：输出 4 个关键点，底部 2 个为 v=0
+
+        坐标越界处理：标注可能部分超出画面（如 C7/ S1 贴边），导出时
+        会将所有 x/y 坐标 clamp 到 [0, 1]，同时 bbox 从 clamped points 重新计算，
+        避免 ultralytics 训练时报“越界”。可见性保留用户原始标记不变。
         """
+        def _clamp01(v: float) -> float:
+            return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
 
@@ -622,66 +629,54 @@ class YOLOConverter:
                 if ann.shape_type == "line":
                     # Line 标注：2 点 → pose 格式 4 关键点，底部 2 点 v=0
                     p0, p1 = ann.points[0], ann.points[1]
-                    x_min = min(p0.x, p1.x)
-                    x_max = max(p0.x, p1.x)
-                    y_min = min(p0.y, p1.y)
-                    y_max = max(p0.y, p1.y)
-                    bbox_w = max(x_max - x_min, 1.0)
-                    bbox_h = max(y_max - y_min, 1.0)
+                    p0_xn = _clamp01(p0.x / w_img)
+                    p0_yn = _clamp01(p0.y / h_img)
+                    p1_xn = _clamp01(p1.x / w_img)
+                    p1_yn = _clamp01(p1.y / h_img)
+                    x_min = min(p0_xn, p1_xn)
+                    x_max = max(p0_xn, p1_xn)
+                    y_min = min(p0_yn, p1_yn)
+                    y_max = max(p0_yn, p1_yn)
+                    bbox_w = max(x_max - x_min, 1.0 / w_img)
+                    bbox_h = max(y_max - y_min, 1.0 / h_img)
                     bbox_cx = x_min + bbox_w / 2
                     bbox_cy = y_min + bbox_h / 2
 
+                    v = int(ann.keypoint_visibility)
                     parts = [
                         str(ann.class_id),
-                        f"{bbox_cx / w_img:.6f}",
-                        f"{bbox_cy / h_img:.6f}",
-                        f"{bbox_w / w_img:.6f}",
-                        f"{bbox_h / h_img:.6f}",
+                        f"{bbox_cx:.6f}", f"{bbox_cy:.6f}",
+                        f"{bbox_w:.6f}", f"{bbox_h:.6f}",
+                        # 左上 / 右上使用用户可见性
+                        f"{p0_xn:.6f}", f"{p0_yn:.6f}", str(v),
+                        f"{p1_xn:.6f}", f"{p1_yn:.6f}", str(v),
+                        # 右下 / 左下：line 语义下底边不存在，v=0
+                        f"{p1_xn:.6f}", f"{p1_yn:.6f}", "0",
+                        f"{p0_xn:.6f}", f"{p0_yn:.6f}", "0",
                     ]
-                    v = int(ann.keypoint_visibility)
-                    # 左上、右上：可见(v)
-                    parts.append(f"{p0.x / w_img:.6f}")
-                    parts.append(f"{p0.y / h_img:.6f}")
-                    parts.append(str(v))
-                    parts.append(f"{p1.x / w_img:.6f}")
-                    parts.append(f"{p1.y / h_img:.6f}")
-                    parts.append(str(v))
-                    # 右下、左下：不可见(0)
-                    parts.append(f"{p1.x / w_img:.6f}")
-                    parts.append(f"{p1.y / h_img:.6f}")
-                    parts.append("0")
-                    parts.append(f"{p0.x / w_img:.6f}")
-                    parts.append(f"{p0.y / h_img:.6f}")
-                    parts.append("0")
-
                     f.write(" ".join(parts) + "\n")
                 else:
-                    # OBB 标注：原有逻辑
-                    xs = [p.x for p in ann.points]
-                    ys = [p.y for p in ann.points]
+                    # OBB 标注：clamp 到 [0,1] 后重算 bbox
+                    xs = [_clamp01(p.x / w_img) for p in ann.points]
+                    ys = [_clamp01(p.y / h_img) for p in ann.points]
                     x_min, x_max = min(xs), max(xs)
                     y_min, y_max = min(ys), max(ys)
 
-                    bbox_w = x_max - x_min
-                    bbox_h = y_max - y_min
+                    bbox_w = max(x_max - x_min, 1.0 / w_img)
+                    bbox_h = max(y_max - y_min, 1.0 / h_img)
                     bbox_cx = x_min + bbox_w / 2
                     bbox_cy = y_min + bbox_h / 2
 
                     v = int(ann.keypoint_visibility)
-
                     parts = [
                         str(ann.class_id),
-                        f"{bbox_cx / w_img:.6f}",
-                        f"{bbox_cy / h_img:.6f}",
-                        f"{bbox_w / w_img:.6f}",
-                        f"{bbox_h / h_img:.6f}",
+                        f"{bbox_cx:.6f}", f"{bbox_cy:.6f}",
+                        f"{bbox_w:.6f}", f"{bbox_h:.6f}",
                     ]
-
-                    # Keypoints: 顺时针 左上, 右上, 右下, 左下
-                    # OBBAnnotation.points 即按此顺序存储
-                    for p in ann.points:
-                        parts.append(f"{p.x / w_img:.6f}")
-                        parts.append(f"{p.y / h_img:.6f}")
+                    # Keypoints：顺时针 左上、右上、右下、左下
+                    for x, y in zip(xs, ys):
+                        parts.append(f"{x:.6f}")
+                        parts.append(f"{y:.6f}")
                         parts.append(str(v))
 
                     f.write(" ".join(parts) + "\n")
