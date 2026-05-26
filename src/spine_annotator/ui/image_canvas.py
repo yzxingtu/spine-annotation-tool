@@ -354,15 +354,21 @@ class AnnotationCanvas(QGraphicsView):
 
     @staticmethod
     def _numpy_to_pixmap(img: np.ndarray) -> QPixmap:
-        """将 OpenCV BGR / 灰度 numpy 转为 QPixmap。"""
+        """将 OpenCV BGR / 灰度 numpy 转为 QPixmap。
+
+        Windows 上 PyQt5 对非 C-contiguous 的 numpy buffer 处理不一致（会出现
+        画面不刷新/错位），这里强制 ascontiguousarray + qimg.copy() 两重保险。
+        """
         if img.ndim == 2:
-            h, w = img.shape
-            qimg = QImage(img.data, w, h, w, QImage.Format_Grayscale8)
+            buf = np.ascontiguousarray(img)
+            h, w = buf.shape
+            qimg = QImage(buf.data, w, h, w, QImage.Format_Grayscale8)
         else:
-            # OpenCV BGR → RGB
+            # OpenCV BGR → RGB，同时保证内存连续
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb.shape
-            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            buf = np.ascontiguousarray(rgb)
+            h, w, ch = buf.shape
+            qimg = QImage(buf.data, w, h, ch * w, QImage.Format_RGB888)
         # copy() 避免 numpy buffer 被 GC 后 Qt 显示异常
         return QPixmap.fromImage(qimg.copy())
 
@@ -373,9 +379,35 @@ class AnnotationCanvas(QGraphicsView):
             return
         rendered = apply_enhancement(self._original_image, self._enhance_params)
         self._pixmap_item.setPixmap(self._numpy_to_pixmap(rendered))
+        # Windows 后端（D2D / raster）在某些情况下 setPixmap 后不会自动调度
+        # viewport 重绘（macOS Cocoa 会自动），这里显式触发一次。
+        self._pixmap_item.update()
+        self.viewport().update()
 
     def get_enhance_params(self) -> EnhanceParams:
         return self._enhance_params
+
+    @staticmethod
+    def _imread_unicode(path: str) -> Optional[np.ndarray]:
+        """带 Unicode 路径容错的 imread。
+
+        Windows 上 cv2.imread 不支持中文/特殊字符路径，会静默返回 None，
+        导致 _original_image 为 None 后续增强参数调整全部不生效。
+        这里先走 cv2.imread，失败后回退到 np.fromfile + cv2.imdecode。
+        """
+        try:
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            if img is not None:
+                return img
+        except Exception:
+            pass
+        try:
+            data = np.fromfile(path, dtype=np.uint8)
+            if data.size == 0:
+                return None
+            return cv2.imdecode(data, cv2.IMREAD_COLOR)
+        except Exception:
+            return None
 
     def load_image(self, image_path: str, annotations: List[OBBAnnotation]):
         """Load an image and its annotations into the canvas."""
@@ -384,11 +416,8 @@ class AnnotationCanvas(QGraphicsView):
         self._index_map = []
         self._current_selection = -1
 
-        # 读原始图为 numpy BGR（供增强管线复用）
-        try:
-            img = cv2.imread(image_path, cv2.IMREAD_COLOR)
-        except Exception:
-            img = None
+        # 读原始图为 numpy BGR（供增强管线复用），兼容 Windows 中文路径
+        img = self._imread_unicode(image_path)
         if img is None:
             # 降级：直接从 QPixmap 加载（无法增强但仍可显示）
             pixmap = QPixmap(image_path)
