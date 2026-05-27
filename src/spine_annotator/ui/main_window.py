@@ -33,6 +33,8 @@ class MainWindow(QMainWindow):
     SETTINGS_LAST_DATASET = "last_dataset_dir"
     SETTINGS_LAST_OUTPUT = "last_output_dir"
     SETTINGS_LAST_FORMAT = "last_export_format"  # 字符串：yolov8_obb / yolov8_xywhr / yolov8_pose
+    SETTINGS_SAVE_MIN_COUNT_ENABLED = "save_min_count_enabled"
+    SETTINGS_SAVE_MIN_COUNT_VALUE = "save_min_count_value"
 
     def __init__(self):
         super().__init__()
@@ -64,6 +66,14 @@ class MainWindow(QMainWindow):
         # 绘制模式状态
         self._current_draw_shape: str = "none"  # "none", "rect", "line"
         self._current_draw_class_id: Optional[int] = None
+
+        # 全局通用设置
+        self._save_min_count_enabled = bool(
+            self._settings.value(self.SETTINGS_SAVE_MIN_COUNT_ENABLED, True, type=bool)
+        )
+        self._save_min_count_value = int(
+            self._settings.value(self.SETTINGS_SAVE_MIN_COUNT_VALUE, 18, type=int)
+        )
 
         self._init_ui()
         self._init_menubar()
@@ -377,6 +387,13 @@ class MainWindow(QMainWindow):
 
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
+        act_general_settings = QAction("通用设置…", self)
+        act_general_settings.setStatusTip("打开全局通用设置")
+        act_general_settings.triggered.connect(self._open_general_settings)
+        tools_menu.addAction(act_general_settings)
+
+        tools_menu.addSeparator()
+
         act_clear_all = QAction("清空所有标注…", self)
         act_clear_all.setStatusTip("删除进度缓存与当前 split 的训练标注文件（不可恢复）")
         act_clear_all.triggered.connect(self._clear_all_data)
@@ -418,6 +435,53 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn_box)
 
         dlg.exec_()
+
+    def _open_general_settings(self):
+        """打开全局通用设置窗口。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("通用设置")
+        dlg.setModal(True)
+        dlg.resize(460, 200)
+
+        layout = QVBoxLayout(dlg)
+
+        chk_save_min_count = QCheckBox("保存时检查标注数量不少于")
+        chk_save_min_count.setChecked(self._save_min_count_enabled)
+
+        row = QHBoxLayout()
+        row.addWidget(chk_save_min_count)
+        spn_save_min_count = QSpinBox()
+        spn_save_min_count.setRange(1, 999)
+        spn_save_min_count.setValue(max(1, int(self._save_min_count_value)))
+        row.addWidget(spn_save_min_count)
+        row.addWidget(QLabel("个"))
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        hint = QLabel("默认启用，默认值 18。关闭后，保存当前时不再校验标注数量。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(self._muted_text_style(11))
+        layout.addWidget(hint)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        layout.addWidget(btn_box)
+
+        def _sync_enabled():
+            spn_save_min_count.setEnabled(chk_save_min_count.isChecked())
+
+        chk_save_min_count.toggled.connect(_sync_enabled)
+        _sync_enabled()
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        self._save_min_count_enabled = bool(chk_save_min_count.isChecked())
+        self._save_min_count_value = int(spn_save_min_count.value())
+        self._settings.setValue(self.SETTINGS_SAVE_MIN_COUNT_ENABLED, self._save_min_count_enabled)
+        self._settings.setValue(self.SETTINGS_SAVE_MIN_COUNT_VALUE, self._save_min_count_value)
+        self.statusBar().showMessage("通用设置已保存", 2500)
 
     def _build_shortcut_html(self) -> str:
         """构建快捷键帮助 HTML 内容。"""
@@ -1265,6 +1329,18 @@ class MainWindow(QMainWindow):
 
         if not self._current_annotation:
             return
+
+        if self._save_min_count_enabled:
+            ann_count = len(self._current_annotation.annotations)
+            min_count = max(1, int(self._save_min_count_value))
+            if ann_count < min_count:
+                if not silent:
+                    QMessageBox.warning(
+                        self, "保存失败",
+                        f"当前图片标注数量为 {ann_count}，少于设置要求的 {min_count}。\n"
+                        "请补充标注，或在“工具 -> 通用设置”中调整该规则。"
+                    )
+                return
 
         info = self._image_infos[self._current_index]
 
