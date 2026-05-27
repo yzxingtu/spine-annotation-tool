@@ -6,8 +6,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .models import (
-    VERTEBRA_CLASSES, ImageAnnotation, OBBAnnotation, Point,
-    get_vertebra_category,
+    EXPORT_CLASS_ID_S1,
+    EXPORT_CLASS_ID_VERTEBRA,
+    INTERNAL_CLASS_ID_S1,
+    VERTEBRA_CLASSES,
+    ImageAnnotation,
+    OBBAnnotation,
+    Point,
+    to_export_class_id,
 )
 
 
@@ -381,10 +387,12 @@ class YOLOConverter:
         - OBB  (9 fields): class_id x1 y1 x2 y2 x3 y3 x4 y4  →  YOLOv8-OBB
         - Pose (17 fields): class_id cx cy w h x1 y1 v1 x2 y2 v2 x3 y3 v3 x4 y4 v4
 
-        旧数据集兼容：
-        - class_id 1/2 (脊柱外框) 完全跳过
-        - class_id 0 (泛化"Vertebra") 按 center.y 从上到下自动编号
-        - 新数据集 (class_id 0~18 对应 C7~S1) 直接加载
+        class_id 兼容矩阵：
+        - 旧 YOLOv5 AABB：class_id 1/2 = 脊柱整体外框 (scoliosis/normal spine)，跳过；
+                          class_id 0 = 泛化 "Vertebra"，按 center.y 自动编号为 C7→L5
+        - 旧解剖学 OBB/pose（class_id ∈ 0..18 对应 C7..S1）：直接按 VERTEBRA_CLASSES 加载
+        - 新 2 类 OBB/pose（class_id ∈ {0=vertebra, 1=S1}）：按 y 排序，
+                          class_id=1 → S1 (内部 18)，class_id=0 → 从上到下补 C7..L5
         """
         raw_aabb_entries: list[tuple[int, float, float, float, float]] = []
         raw_obb_entries: list[tuple[int, List[Point], str]] = []
@@ -397,15 +405,11 @@ class YOLOConverter:
 
                 class_id = int(parts[0])
 
-                # 跳过脊柱外框
-                if class_id in (1, 2):
-                    continue
-                category = get_vertebra_category(class_id)
-                if category is None and class_id != 0:
-                    continue
-
                 if len(parts) == 5:
-                    # AABB 格式: class_id cx cy w h
+                    # AABB 格式: class_id cx cy w h  (旧 YOLOv5)
+                    # 跳过脊柱整体外框（1=scoliosis spine, 2=normal spine）
+                    if class_id in (1, 2):
+                        continue
                     cx_norm = float(parts[1])
                     cy_norm = float(parts[2])
                     w_norm = float(parts[3])
@@ -492,20 +496,79 @@ class YOLOConverter:
                     ann = OBBAnnotation.from_aabb(class_id, class_name, cx, cy, w, h)
                     annotations.append(ann)
 
-        # 处理 OBB/pose 条目
-        for class_id, points, shape_type in raw_obb_entries:
-            class_name = VERTEBRA_CLASSES.get(class_id, f"class_{class_id}")
-            if shape_type == "line" and len(points) == 2:
-                ann = OBBAnnotation.from_line(
-                    class_id, class_name,
-                    points[0].x, points[0].y, points[1].x, points[1].y,
-                )
-            else:
-                ann = OBBAnnotation(class_id, class_name, points)
-                ann._update_geometry()
-            annotations.append(ann)
+        # 处理 OBB/pose 条目：先识别是 "新 2 类导出" 还是 "旧解剖学编号"
+        if raw_obb_entries:
+            annotations.extend(self._resolve_obb_entries(raw_obb_entries))
 
         return annotations
+
+    def _resolve_obb_entries(
+        self,
+        raw_obb_entries: List[Tuple[int, List[Point], str]],
+    ) -> List[OBBAnnotation]:
+        """把 (export_class_id, points, shape_type) 列表转成 OBBAnnotation。
+
+        - 新 2 类格式（class_id ⊆ {0, 1} 且含 S1=1）：按 y 排序，
+          class_id=1 恢复为 S1（内部 id=18），class_id=0 从上到下顺序补 C7..L5
+        - 旧解剖学格式（出现 class_id > 1）：按 VERTEBRA_CLASSES 直接映射
+        """
+        export_class_ids = {e[0] for e in raw_obb_entries}
+        is_new_2class = (
+            export_class_ids <= {EXPORT_CLASS_ID_VERTEBRA, EXPORT_CLASS_ID_S1}
+            and EXPORT_CLASS_ID_S1 in export_class_ids
+        )
+
+        annotations: List[OBBAnnotation] = []
+
+        if is_new_2class:
+            def _mean_y(entry: Tuple[int, List[Point], str]) -> float:
+                _, points, _ = entry
+                return sum(p.y for p in points) / max(len(points), 1)
+
+            sorted_entries = sorted(raw_obb_entries, key=_mean_y)
+            next_internal_id = 0  # 从 C7 起补
+            for export_cid, points, shape_type in sorted_entries:
+                if export_cid == EXPORT_CLASS_ID_S1:
+                    internal_id = INTERNAL_CLASS_ID_S1
+                    class_name = "S1"
+                else:
+                    internal_id = next_internal_id
+                    class_name = VERTEBRA_CLASSES.get(internal_id, f"V{internal_id}")
+                    next_internal_id += 1
+                    # 跳过 S1 槽位（18），避免和真正的 S1 冲突
+                    if next_internal_id == INTERNAL_CLASS_ID_S1:
+                        next_internal_id += 1
+                annotations.append(self._build_obb_annotation(
+                    internal_id, class_name, points, shape_type,
+                ))
+        else:
+            # 旧解剖学编号：直接按 class_id 映射，越界的跳过
+            for class_id, points, shape_type in raw_obb_entries:
+                if class_id < 0 or class_id not in VERTEBRA_CLASSES:
+                    continue
+                class_name = VERTEBRA_CLASSES[class_id]
+                annotations.append(self._build_obb_annotation(
+                    class_id, class_name, points, shape_type,
+                ))
+
+        return annotations
+
+    def _build_obb_annotation(
+        self,
+        class_id: int,
+        class_name: str,
+        points: List[Point],
+        shape_type: str,
+    ) -> OBBAnnotation:
+        """根据 shape_type 构造 OBB 或 line 标注。"""
+        if shape_type == "line" and len(points) == 2:
+            return OBBAnnotation.from_line(
+                class_id, class_name,
+                points[0].x, points[0].y, points[1].x, points[1].y,
+            )
+        ann = OBBAnnotation(class_id, class_name, points)
+        ann._update_geometry()
+        return ann
 
     def _is_degenerate_obb(self, coords: List[float]) -> bool:
         """检测 OBB 坐标是否为退化矩形（底边与顶边重合，即 line 类型）。
@@ -524,9 +587,12 @@ class YOLOConverter:
     def save_obb_yolov8(self, annotation: ImageAnnotation,
                         output_dir: str, overwrite: bool = False):
         """Save annotations in YOLOv8-OBB format.
-        
+
         Format: class_id x1 y1 x2 y2 x3 y3 x4 y4 (normalized)
-        
+
+        class_id 折叠为 2 类：S1 → 1，其它椎骨 → 0
+        （内部解剖学编号仅用于 UI / cache，落盘时通过 to_export_class_id 转换）
+
         Line 类型标注：将 2 点扩展为退化 OBB（底边与顶边重合），
         底部两个关键点在 pose 格式中以 v=0 输出，OBB 格式中仍为 4 点。
         """
@@ -561,7 +627,8 @@ class YOLOConverter:
                         coords.append(f"{p.x / w_img:.6f}")
                         coords.append(f"{p.y / h_img:.6f}")
 
-                line = f"{ann.class_id} {' '.join(coords)}\n"
+                export_cid = to_export_class_id(ann.class_id)
+                line = f"{export_cid} {' '.join(coords)}\n"
                 f.write(line)
 
         return True
@@ -569,8 +636,10 @@ class YOLOConverter:
     def save_obb_xywhr(self, annotation: ImageAnnotation,
                        output_dir: str, overwrite: bool = False):
         """Save annotations in YOLOv8-OBB xywhr format.
-        
+
         Format: class_id cx cy w h angle (normalized, angle in radians [-pi/4, pi/4))
+
+        class_id 折叠为 2 类：S1 → 1，其它椎骨 → 0
         """
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
@@ -592,8 +661,9 @@ class YOLOConverter:
                 # Normalize angle to [-pi/4, pi/4)
                 angle = self._normalize_angle(angle)
 
+                export_cid = to_export_class_id(ann.class_id)
                 line = (
-                    f"{ann.class_id} "
+                    f"{export_cid} "
                     f"{cx / w_img:.6f} {cy / h_img:.6f} "
                     f"{w / w_img:.6f} {h / h_img:.6f} "
                     f"{angle:.6f}\n"
@@ -609,17 +679,23 @@ class YOLOConverter:
         Format per line (all normalized to [0, 1]):
             class_id  cx cy w h  x1 y1 v1  x2 y2 v2  x3 y3 v3  x4 y4 v4
 
+        - class_id 折叠为 2 类（与 scoliosis-pose/scoliosis.yaml 对齐）：
+            0 = vertebra (C7~L5 共 18 节统一为一类)
+            1 = S1       (骶骨第一节，作为下端解剖锚点)
+          内部解剖学编号（C7=0..S1=18）只在 UI / cache 中使用，落盘时通过
+          to_export_class_id 折叠。下游算法（如 Cobb 角后处理）通过 y 排序 +
+          S1 锚点自行恢复每节椎骨的解剖序。
         - bbox(cx, cy, w, h): 包围 OBB 四个角点的 AABB
         - keypoints: 椎骨矩形的 4 个角点，顺时针排列
             x1,y1 = 左上, x2,y2 = 右上, x3,y3 = 右下, x4,y4 = 左下
         - v: 可见性 (0=不可见, 1=遮挡, 2=可见)
           取自 OBBAnnotation.keypoint_visibility（对该标注 4 个点统一生效），默认 2
-        
+
         Line 类型标注：输出 4 个关键点，底部 2 个为 v=0
 
         坐标越界处理：标注可能部分超出画面（如 C7/ S1 贴边），导出时
         会将所有 x/y 坐标 clamp 到 [0, 1]，同时 bbox 从 clamped points 重新计算，
-        避免 ultralytics 训练时报“越界”。可见性保留用户原始标记不变。
+        避免 ultralytics 训练时报"越界"。可见性保留用户原始标记不变。
         """
         def _clamp01(v: float) -> float:
             return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
@@ -637,11 +713,13 @@ class YOLOConverter:
         w_img = annotation.image_width
         h_img = annotation.image_height
 
-        # 按 class_id 升序导出，保证 .txt 中椎骨按 C7→T1→...→S1 顺序排列
+        # 按内部 class_id 升序导出，保证 .txt 中按 C7→T1→...→L5→S1 的解剖序排列
+        # （即使导出 class_id 被折叠为 0/1，物理顺序仍是从上到下，方便人工核对）
         sorted_annotations = sorted(annotation.annotations, key=lambda a: a.class_id)
 
         with open(label_path, "w") as f:
             for ann in sorted_annotations:
+                export_cid = to_export_class_id(ann.class_id)
                 if ann.shape_type == "line":
                     # Line 标注：2 点 → pose 格式 4 关键点，底部 2 点 v=0
                     p0, p1 = ann.points[0], ann.points[1]
@@ -660,7 +738,7 @@ class YOLOConverter:
 
                     v = int(ann.keypoint_visibility)
                     parts = [
-                        str(ann.class_id),
+                        str(export_cid),
                         f"{bbox_cx:.6f}", f"{bbox_cy:.6f}",
                         f"{bbox_w:.6f}", f"{bbox_h:.6f}",
                         # 左上 / 右上使用用户可见性
@@ -685,7 +763,7 @@ class YOLOConverter:
 
                     v = int(ann.keypoint_visibility)
                     parts = [
-                        str(ann.class_id),
+                        str(export_cid),
                         f"{bbox_cx:.6f}", f"{bbox_cy:.6f}",
                         f"{bbox_w:.6f}", f"{bbox_h:.6f}",
                     ]

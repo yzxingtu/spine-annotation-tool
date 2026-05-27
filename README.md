@@ -88,6 +88,13 @@ python main.py
 
 ## 导出格式
 
+> **关于 `class_id` 的折叠**：标注工具 UI 中按 19 节解剖编号操作（C7=0, T1=1, ..., L5=17, S1=18），方便人工识别与 QA；
+> 但所有导出格式落盘时会自动折叠为训练用的 2 类（与 `scoliosis-pose/scoliosis.yaml` 对齐）：
+> - 内部 S1 (18) → 导出 `class_id = 1`
+> - 内部 C7~L5 (0~17) → 导出 `class_id = 0`
+>
+> 椎骨的解剖序（C7→S1）通过下游算法按 y 排序 + S1 锚点自行恢复。
+
 ### YOLOv8-OBB 四角点格式（默认）
 
 ```
@@ -112,7 +119,7 @@ class_id cx cy w h angle
 class_id cx cy w h x1 y1 v1 x2 y2 v2 x3 y3 v3 x4 y4 v4
 ```
 
-- `class_id`：类别 ID
+- `class_id`：类别 ID（0 = vertebra, 1 = S1）
 - `cx, cy, w, h`：包围 OBB 四个角点的 **AABB**（归一化）
 - `x1..x4, y1..y4`：椎骨矩形的 4 个角点，**顺时针** 排列
   - `(x1, y1)` 左上 → `(x2, y2)` 右上 → `(x3, y3)` 右下 → `(x4, y4)` 左下
@@ -123,7 +130,15 @@ class_id cx cy w h x1 y1 v1 x2 y2 v2 x3 y3 v3 x4 y4 v4
 
 画布上视觉差异：v=2 实线，v=1 短虚线，v=0 长虚线，标签会显示 `[v=1 遮挡]` 等标记。
 
-可直接用于 YOLOv8-pose 模型训练（`kpt_shape: [4, 3]`）。
+可直接用于 YOLOv8-pose 模型训练（`kpt_shape: [4, 3]`，`nc: 2`）。
+
+### 加载兼容性
+
+打开数据集时，`_load_labels` 会自动识别下列三种 .txt 格式并恢复为内部解剖编号：
+
+1. **新 2 类 OBB/pose**（`class_id ∈ {0, 1}` 且含 S1=1）：按 y 排序，C7→L5 顺序补齐，S1 锚定为内部 18
+2. **旧解剖学 OBB/pose**（`class_id ∈ 0..18`）：按 `VERTEBRA_CLASSES` 直接映射
+3. **旧 YOLOv5 AABB**（5 字段）：`class_id 1/2` 为脊柱整体外框，跳过；`class_id 0` 按 y 自动编号为 C7→L5
 
 ## 数据集目录结构要求
 

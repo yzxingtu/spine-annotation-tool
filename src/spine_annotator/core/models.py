@@ -10,7 +10,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # 椎骨类别定义 (class_id → class_name)
 # ---------------------------------------------------------------------------
-# C7=0, T1~T12=1~12, L1~L5=13~17, S1=18
+# 内部解剖学编号 (UI 与缓存使用): C7=0, T1~T12=1~12, L1~L5=13~17, S1=18
+# 导出到 YOLO .txt 时会折叠为 2 类（见下方 to_export_class_id）
 VERTEBRA_CLASSES: dict[int, str] = {
     0:  "C7",
     1:  "T1",  2:  "T2",  3:  "T3",  4:  "T4",  5:  "T5",
@@ -19,6 +20,28 @@ VERTEBRA_CLASSES: dict[int, str] = {
     13: "L1",  14: "L2",  15: "L3",  16: "L4",  17: "L5",
     18: "S1",
 }
+
+# 内部 S1 编号（用于 export 映射 / 加载时的特殊判断）
+INTERNAL_CLASS_ID_S1: int = 18
+
+# YOLO 训练标签的 class_id（与 scoliosis-pose/scoliosis.yaml 的 names 对齐）
+#   0 = vertebra  (C7 ~ L5 共 18 节统一为一类)
+#   1 = S1        (骶骨第一节，作为骨盆 / 下端解剖锚点)
+EXPORT_CLASS_ID_VERTEBRA: int = 0
+EXPORT_CLASS_ID_S1: int = 1
+EXPORT_CLASS_NAMES: dict[int, str] = {
+    EXPORT_CLASS_ID_VERTEBRA: "vertebra",
+    EXPORT_CLASS_ID_S1: "S1",
+}
+
+
+def to_export_class_id(internal_class_id: int) -> int:
+    """将内部解剖学 class_id (C7=0 .. S1=18) 折叠为 YOLO 训练用 class_id。
+
+    S1 (内部 id=18) → 1
+    其它椎骨        → 0
+    """
+    return EXPORT_CLASS_ID_S1 if internal_class_id == INTERNAL_CLASS_ID_S1 else EXPORT_CLASS_ID_VERTEBRA
 
 
 class VertebraCategory:
