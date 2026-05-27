@@ -72,7 +72,7 @@ class MainWindow(QMainWindow):
             self._settings.value(self.SETTINGS_SAVE_MIN_COUNT_ENABLED, True, type=bool)
         )
         self._save_min_count_value = int(
-            self._settings.value(self.SETTINGS_SAVE_MIN_COUNT_VALUE, 18, type=int)
+            self._settings.value(self.SETTINGS_SAVE_MIN_COUNT_VALUE, 19, type=int)
         )
 
         self._init_ui()
@@ -458,7 +458,7 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         layout.addLayout(row)
 
-        hint = QLabel("默认启用，默认值 18。关闭后，保存当前时不再校验标注数量。")
+        hint = QLabel("默认启用，默认值 19。关闭后，保存当前时不再校验标注数量。")
         hint.setWordWrap(True)
         hint.setStyleSheet(self._muted_text_style(11))
         layout.addWidget(hint)
@@ -1623,7 +1623,7 @@ class MainWindow(QMainWindow):
         chk_min_count.setChecked(True)
         spn_min_count = QSpinBox()
         spn_min_count.setRange(1, 999)
-        spn_min_count.setValue(18)
+        spn_min_count.setValue(19)
         lbl_suffix = QLabel("个")
         min_count_row.addWidget(chk_min_count)
         min_count_row.addWidget(spn_min_count)
