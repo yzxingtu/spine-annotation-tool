@@ -163,20 +163,33 @@ class YOLOConverter:
             )
 
             # 从 cache 恢复编辑后的 OBB 几何 + keypoint_visibility
-            # （按索引一一对应；如果索引超出范围则保留原 AABB 几何）
+            # cache 是用户最新编辑状态的权威来源（以数量为准）：
+            # - 文件标注数 > cache state 数：用户删除了标注，截断文件多余部分
+            # - 文件标注数 < cache state 数：用户新增了标注，从 cache 追加
+            # - 文件标注数 = cache state 数：一一对应恢复
+            # 注：使用位置匹配（而非 class_id），因新 2 类格式下 class_id 可能全部为 0
             if cache_entry and "annotation_states" in cache_entry:
                 states = cache_entry["annotation_states"]
-                for i, ann in enumerate(annotation.annotations):
-                    if i >= len(states):
-                        continue
-                    state = states[i]
-                    self._restore_annotation_state(ann, state)
 
-                # 处理 cache 中多余的新增标注（用户新绘制的，文件中尚未保存）
-                for i in range(len(annotation.annotations), len(states)):
-                    state = states[i]
+                # 以 cache 数量为准，截断或保留文件标注
+                file_count = len(annotation.annotations)
+                cache_count = len(states)
+                match_count = min(file_count, cache_count)
+
+                # 对位置重叠的标注恢复 cache 状态
+                for i in range(match_count):
+                    self._restore_annotation_state(
+                        annotation.annotations[i], states[i]
+                    )
+
+                # 截断文件多出的标注（用户已删除）
+                if cache_count < file_count:
+                    annotation.annotations = annotation.annotations[:cache_count]
+
+                # 追加 cache 中多出的新增标注（用户新绘制尚未保存）
+                for i in range(file_count, cache_count):
                     new_ann = self._create_annotation_from_state(
-                        state, img_w, img_h
+                        states[i], img_w, img_h
                     )
                     if new_ann is not None:
                         annotation.annotations.append(new_ann)
@@ -499,6 +512,12 @@ class YOLOConverter:
         # 处理 OBB/pose 条目：先识别是 "新 2 类导出" 还是 "旧解剖学编号"
         if raw_obb_entries:
             annotations.extend(self._resolve_obb_entries(raw_obb_entries))
+
+        # 限制最多加载 VERTEBRA_CLASSES 数量的标注（19 个：C7~L5 + S1），
+        # 超出的多余框（如旧数据中的额外标注）直接丢弃，避免画布显示灰色 V 开头框
+        max_count = len(VERTEBRA_CLASSES)
+        if len(annotations) > max_count:
+            annotations = annotations[:max_count]
 
         return annotations
 
