@@ -4,14 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spine-annotator"
-version = "0.2.4"
-description = "Spine vertebrae annotation tool with OBB support"
+version = "0.3.0"
+description = "Spine vertebrae annotation tool with OBB support and AI-assisted inference"
 requires-python = ">=3.9"
 dependencies = [
     "PyQt5>=5.15.0",
     "numpy>=1.21.0",
     "opencv-python-headless>=4.5.0",
     "Pillow>=9.0.0",
+    "onnxruntime>=1.17",
+    "spine-infer>=0.2.0",
 ]
 
 [project.scripts]

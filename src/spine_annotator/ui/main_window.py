@@ -24,6 +24,8 @@ from ..core.models import (
 )
 from .image_canvas import AnnotationCanvas, CATEGORY_COLORS
 from .enhancement_panel import EnhancementDialog, EnhancementToolbar
+from .inference_worker import InferenceWorker
+from ..core.inference import ModelManager
 
 
 class MainWindow(QMainWindow):
@@ -71,6 +73,10 @@ class MainWindow(QMainWindow):
         # 绘制模式状态
         self._current_draw_shape: str = "none"  # "none", "rect", "line"
         self._current_draw_class_id: Optional[int] = None
+
+        # AI 推理
+        self._model_manager = ModelManager()
+        self._inference_worker: Optional[InferenceWorker] = None
 
         # 全局通用设置
         self._save_min_count_enabled = bool(
@@ -398,6 +404,15 @@ class MainWindow(QMainWindow):
 
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
+
+        act_inference = QAction("AI 推理预标注", self)
+        act_inference.setShortcut(QKeySequence("Ctrl+I"))
+        act_inference.setStatusTip("对当前图片执行 AI 推理，清空画布并填充预标注结果")
+        act_inference.triggered.connect(self._run_inference)
+        tools_menu.addAction(act_inference)
+
+        tools_menu.addSeparator()
+
         act_general_settings = QAction("通用设置…", self)
         act_general_settings.setStatusTip("打开全局通用设置")
         act_general_settings.triggered.connect(self._open_general_settings)
@@ -548,6 +563,9 @@ class MainWindow(QMainWindow):
                 ("Esc",               "取消选中 / 退出绘制模式"),
                 ("F",                 "适配画布 (Fit)"),
             ]),
+            ("AI 推理", [
+                ("Ctrl+I",            "对当前图片执行 AI 推理预标注"),
+            ]),
             ("文件 / 状态", [
                 ("Ctrl+S",            "保存当前图片标注"),
                 ("Ctrl+Z",            "撤销"),
@@ -636,6 +654,8 @@ class MainWindow(QMainWindow):
             QKeySequence("Ctrl+Shift+Backspace"): self._clear_current_image,
             # 标记难点
             QKeySequence("M"): self._toggle_flag_current,
+            # AI 推理预标注
+            QKeySequence("Ctrl+I"): self._run_inference,
             # 跳到下一张 / 上一张未标注图片（断点续标核心快捷键）
             QKeySequence("Ctrl+N"): self._jump_to_next_unannotated,
             QKeySequence("Ctrl+B"): self._jump_to_prev_unannotated,
@@ -1890,6 +1910,126 @@ class MainWindow(QMainWindow):
         if deleted_label:
             msg += "（同时删除了 .txt 文件）"
         self.statusBar().showMessage(msg, 4000)
+
+    # ------------------------------------------------------------------
+    # AI 推理预标注
+    # ------------------------------------------------------------------
+
+    def _run_inference(self):
+        """对当前图片执行 AI 推理，清空画布并填充预标注结果。"""
+        # 前置检查
+        if not self._image_infos or self._current_index < 0:
+            QMessageBox.warning(self, "AI 推理", "请先加载数据集。")
+            return
+        if self._current_annotation is None:
+            return
+
+        # 防止重复点击
+        if self._inference_worker is not None and self._inference_worker.isRunning():
+            return
+
+        info = self._image_infos[self._current_index]
+        image_path = info["image_path"]
+
+        # 若有未保存的标注，提示确认
+        n_existing = len(self._current_annotation.annotations)
+        if n_existing > 0:
+            reply = QMessageBox.question(
+                self, "AI 推理预标注",
+                f"当前图片已有 {n_existing} 个标注。\n\n"
+                f"执行推理将清空当前画布的所有标注，并用 AI 结果替换。\n"
+                f"确定继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # 禁用推理按钮，显示进度
+        self.statusBar().showMessage("AI 推理准备中…")
+
+        # 创建并启动 worker
+        self._inference_worker = InferenceWorker(
+            image_path=image_path,
+            model_manager=self._model_manager,
+            parent=self,
+        )
+        self._inference_worker.finished.connect(self._on_inference_finished)
+        self._inference_worker.error.connect(self._on_inference_error)
+        self._inference_worker.progress.connect(self._on_inference_progress)
+        self._inference_worker.start()
+
+    def _on_inference_progress(self, message: str):
+        """推理过程中的进度更新。"""
+        self.statusBar().showMessage(message)
+
+    def _on_inference_finished(self, annotations: list):
+        """推理成功，将结果填充到画布。"""
+        self._inference_worker = None
+
+        if self._current_annotation is None:
+            return
+
+        # 清空现有标注
+        self._current_annotation.annotations.clear()
+
+        # 写入推理结果
+        self._current_annotation.annotations.extend(annotations)
+        self._current_annotation.modified = True
+
+        # 刷新画布（保持当前缩放/平移）
+        info = self._image_infos[self._current_index]
+        self._canvas.load_image(
+            info["image_path"], self._current_annotation.annotations
+        )
+
+        # 应用图层可见性
+        self._apply_layer_visibility()
+
+        # 更新 cache
+        img_path = info["image_path"]
+        self._cache[img_path] = {
+            "annotation_states": self._converter.build_annotation_states(
+                self._current_annotation
+            ),
+        }
+        if self._progress_cache_path:
+            self._converter.save_progress_cache(
+                self._progress_cache_path, self._cache
+            )
+
+        # 刷新 UI
+        self._apply_item_style(self._current_index)
+        self._update_progress()
+        self._update_status()
+
+        # 统计结果
+        from ..core.models import get_vertebra_category
+        cats = {"cervical": 0, "thoracic": 0, "lumbar": 0, "sacral": 0}
+        for ann in annotations:
+            cat = get_vertebra_category(ann.class_id)
+            if cat:
+                cats[cat] += 1
+
+        self.statusBar().showMessage(
+            f"AI 推理完成: {len(annotations)} 个椎骨 "
+            f"(C={cats['cervical']}, T={cats['thoracic']}, "
+            f"L={cats['lumbar']}, S={cats['sacral']})",
+            5000,
+        )
+
+    def _on_inference_error(self, error_msg: str):
+        """推理失败，显示错误信息。"""
+        self._inference_worker = None
+        self.statusBar().showMessage("AI 推理失败", 5000)
+        QMessageBox.critical(
+            self, "AI 推理失败",
+            f"推理过程中发生错误：\n\n{error_msg}\n\n"
+            f"请确保：\n"
+            f"  1. 已安装 spine-infer 和 onnxruntime\n"
+            f"  2. 模型下载地址正确且可访问\n"
+            f"  3. 网络连接正常",
+        )
 
     def _update_progress(self):
         """Update progress bar + 永久进度标签。"""
