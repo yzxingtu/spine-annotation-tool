@@ -95,7 +95,7 @@ jobs:
         run: |
           pip install PyQt5>=5.15.0 numpy>=1.21.0 opencv-python-headless>=4.5.0 Pillow>=9.0.0
           pip install onnxruntime>=1.17
-          pip install ./packages/spine-discern-infer
+          pip install spine-infer>=0.2.0
           pip install pyinstaller>=6.0
 
       # ---------- Windows 打包 ----------
