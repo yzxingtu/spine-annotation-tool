@@ -72,10 +72,10 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact_name: SpineAnnotator-windows
+            artifact_name: X光脊柱标注工具-windows
             ext: ".exe"
           - os: macos-latest
-            artifact_name: SpineAnnotator-macos
+            artifact_name: X光脊柱标注工具-macos
             ext: ".app"
     runs-on: ${{ matrix.os }}
 
@@ -104,7 +104,7 @@ jobs:
         shell: bash
         run: |
           pyinstaller --noconfirm --clean \
-            --name "SpineAnnotator" \
+            --name "X光脊柱标注工具" \
             --windowed \
             --onefile \
             --paths src \
@@ -116,7 +116,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          mv SpineAnnotator.exe "SpineAnnotator-${{ needs.verify-version.outputs.version }}-windows.exe"
+          mv "X光脊柱标注工具.exe" "X光脊柱标注工具 v${{ needs.verify-version.outputs.version }}-windows.exe"
           ls -la
 
       # ---------- macOS 打包 ----------
@@ -124,7 +124,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           pyinstaller --noconfirm --clean \
-            --name "SpineAnnotator" \
+            --name "X光脊柱标注工具" \
             --windowed \
             --paths src \
             --collect-submodules spine_annotator \
@@ -137,18 +137,18 @@ jobs:
           # 使用 ad-hoc 身份对 .app 进行递归签名
           # 注意：PyInstaller 产出的 .app 可能含多个未签名的 dylib/Framework，
           # 需要 --deep 递归签名，--force 覆盖已有签名。
-          codesign --force --deep --sign - dist/SpineAnnotator.app
+          codesign --force --deep --sign - "dist/X光脊柱标注工具.app"
 
           echo "---- 验证签名 ----"
-          codesign --verify --verbose=2 dist/SpineAnnotator.app || true
-          codesign -dv --verbose=2 dist/SpineAnnotator.app || true
+          codesign --verify --verbose=2 "dist/X光脊柱标注工具.app" || true
+          codesign -dv --verbose=2 "dist/X光脊柱标注工具.app" || true
 
       - name: 压缩 macOS .app
         if: runner.os == 'macOS'
         run: |
           cd dist
           # 使用 ditto 代替 zip，保留权限与扩展属性（仅签名不会失效）
-          ditto -c -k --keepParent SpineAnnotator.app "SpineAnnotator-${{ needs.verify-version.outputs.version }}-macos.zip"
+          ditto -c -k --keepParent "X光脊柱标注工具.app" "X光脊柱标注工具 v${{ needs.verify-version.outputs.version }}-macos.zip"
           ls -la
 
       # ---------- 上传 artifact ----------
@@ -157,8 +157,8 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: |
-            dist/SpineAnnotator-*-windows.exe
-            dist/SpineAnnotator-*-macos.zip
+            dist/X光脊柱标注工具 *-windows.exe
+            dist/X光脊柱标注工具 *-macos.zip
           if-no-files-found: ignore
           retention-days: 7
 
@@ -181,29 +181,29 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/SpineAnnotator-*-windows.exe
-            artifacts/**/SpineAnnotator-*-macos.zip
+            artifacts/**/X光脊柱标注工具 *-windows.exe
+            artifacts/**/X光脊柱标注工具 *-macos.zip
           generate_release_notes: true
-          name: "Spine Annotator v${{ needs.verify-version.outputs.version }}"
+          name: "X光脊柱标注工具 v${{ needs.verify-version.outputs.version }}"
           append_body: true
           body: |
             ## 下载与使用
 
             ### Windows
-            直接下载 `SpineAnnotator-*-windows.exe` 双击运行。
-
+            直接下载 `X光脊柱标注工具 *-windows.exe` 双击运行。
+            
             ### macOS
-            本包采用 **ad-hoc 签名**（未经 Apple 公证）。首次打开会提示“无法验证开发者”，请按以下任一方式处理：
-
+            本包采用 **ad-hoc 签名**（未经 Apple 公证）。首次打开会提示"无法验证开发者"，请按以下任一方式处理：
+            
             **推荐（一行命令解决）：**
             ```bash
             # 解压后执行（以实际路径为准）
-            xattr -cr ~/Downloads/SpineAnnotator.app
-            open ~/Downloads/SpineAnnotator.app
+            xattr -cr ~/Downloads/X光脊柱标注工具.app
+            open ~/Downloads/X光脊柱标注工具.app
             ```
-
+            
             **或者手动信任：**
-            1. 在 Finder 中 **右键** 点击 `SpineAnnotator.app` → 选择 **打开**
+            1. 在 Finder 中 **右键** 点击 `X光脊柱标注工具.app` → 选择 **打开**
             2. 弹出警告后点击 **打开** 确认
             3. 后续双击即可正常运行
 
