@@ -220,8 +220,16 @@ class SpineInferenceBridge:
 
             class_name = VERTEBRA_CLASSES.get(internal_id, f"{cat}{offset}")
 
-            # 从 4 个 keypoints 构建 OBB（顺时针 TL, TR, BR, BL）
-            if len(det.keypoints) >= 4:
+            # S1 使用 bbox 构建轴对齐矩形（始终保持矩形约束）
+            # 其他椎骨使用 4 个 keypoints 构建 OBB
+            if cat == "S":
+                x1, y1, x2, y2 = det.bbox_xyxy
+                points = [
+                    Point(x1, y1), Point(x2, y1),
+                    Point(x2, y2), Point(x1, y2),
+                ]
+            elif len(det.keypoints) >= 4:
+                # 从 4 个 keypoints 构建 OBB（顺时针 TL, TR, BR, BL）
                 points = [
                     Point(k.x, k.y) for k in det.keypoints[:4]
                 ]

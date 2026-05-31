@@ -156,7 +156,8 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
     def _draw_handles(self, painter):
         """Draw corner handles and rotation handle (view-scale independent).
 
-        S1 (class_id=18)：允许角点拖动调整宽高，但不绘制旋转手柄（锁定轴对齐）。
+        S1 (class_id=18)：绘制 4 个角点手柄（可拖拽调整宽高，保持矩形约束），
+        但不绘制旋转手柄（角度锁定为 0）。
         """
         s = self._get_view_scale()
         inv_s = 1.0 / s if s > 0 else 1.0
@@ -263,7 +264,8 @@ class OBBGraphicsItem(QGraphicsPolygonItem):
 
         Returns: ('corner', index), ('rotate', -1), or ('none', -1)
 
-        S1 (class_id=18) 允许 corner hit（调整宽高），但不响应 rotate hit。
+        S1 (class_id=18) 允许 corner hit（拖拽调整宽高，保持矩形约束），
+        但不响应 rotate hit（角度锁定）。
 
         命中阈值随视图缩放反向调整，与手柄视觉大小保持一致，
         避免图片放大后点击空白处误中手柄。
