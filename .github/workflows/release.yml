@@ -109,6 +109,7 @@ jobs:
             --onefile \
             --paths src \
             --collect-submodules spine_annotator \
+            --collect-all onnxruntime \
             main.py
 
       - name: 重命名 Windows 产物
@@ -128,6 +129,7 @@ jobs:
             --windowed \
             --paths src \
             --collect-submodules spine_annotator \
+            --collect-all onnxruntime \
             main.py
 
       # ---------- macOS ad-hoc 签名（免费，避免“应用已损坏”）----------
