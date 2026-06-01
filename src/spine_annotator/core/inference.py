@@ -28,7 +28,7 @@ from .models import (
 #: ONNX 模型下载地址（阿里云 OSS），部署后替换为实际 URL
 MODEL_URL: str = (
     "https://yzxingtu.oss-cn-hangzhou.aliyuncs.com"
-    "/spine-discern/model/spine-pose-v0.2.0-1024.onnx?Expires=1780073829&OSSAccessKeyId=TMP.3Ky1EFEs71Fg1dRcaxDGYiqyNDsMTSiyofAUy7TC4sFC613MzmtcRFB7DFPNySmVQ6rrabhgyxn2oKpytqFyKrLAjZyu2d&Signature=u18uZYsh%2Bf%2FxJCaDzwoRWtHMsZk%3D"
+    "/spine-discern/model/spine-pose-v0.2.0-1024.onnx"
 )
 
 #: 模型文件名（与 URL 末尾一致）
