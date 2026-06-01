@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import urllib.request
@@ -111,6 +112,8 @@ class ModelManager:
         tmp_fd, tmp_path_str = tempfile.mkstemp(
             dir=str(self._cache_dir), suffix=".onnx.downloading"
         )
+        # 必须关闭 mkstemp 返回的文件描述符，否则 Windows 上文件被锁定
+        os.close(tmp_fd)
         tmp_path = Path(tmp_path_str)
 
         try:
