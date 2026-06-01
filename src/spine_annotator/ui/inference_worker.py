@@ -118,4 +118,5 @@ class InferenceWorker(QThread):
                 exc,
                 traceback_text,
             )
-            self.error.emit(f"{type(exc).__name__}: {exc}")
+            detail = str(exc).strip() or repr(exc)
+            self.error.emit(f"{type(exc).__name__}: {detail}")

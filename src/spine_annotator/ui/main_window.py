@@ -2060,7 +2060,8 @@ class MainWindow(QMainWindow):
             f"  1. 已安装 spine-infer 和 onnxruntime\n"
             f"  2. 模型下载地址正确且可访问\n"
             f"  3. 网络连接正常\n\n"
-            f"详细堆栈已输出到启动该程序的控制台。",
+            f"详细堆栈已输出到控制台；若为 exe 启动，请查看\n"
+            f"%USERPROFILE%\\.cache\\spine-annotator\\logs\\app.log",
         )
 
     def _update_progress(self):

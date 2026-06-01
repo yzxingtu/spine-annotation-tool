@@ -108,7 +108,11 @@ jobs:
             --windowed \
             --paths src \
             --collect-submodules spine_annotator \
+            --collect-submodules spine_infer \
             --collect-all onnxruntime \
+            --collect-all spine_infer \
+            --hidden-import spine_infer \
+            --hidden-import spine_infer.backends.onnx_backend \
             --additional-hooks-dir hooks \
             main.py
 
@@ -132,7 +136,11 @@ jobs:
             --windowed \
             --paths src \
             --collect-submodules spine_annotator \
+            --collect-submodules spine_infer \
             --collect-all onnxruntime \
+            --collect-all spine_infer \
+            --hidden-import spine_infer \
+            --hidden-import spine_infer.backends.onnx_backend \
             --additional-hooks-dir hooks \
             main.py
 
