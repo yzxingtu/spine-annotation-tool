@@ -229,6 +229,14 @@ class SpineInferenceBridge:
         iou_threshold: float = 0.7,
         input_size: int = MODEL_INPUT_SIZE,
     ) -> None:
+        from .runtime_bootstrap import ensure_onnxruntime
+
+        if not ensure_onnxruntime(before_qt=False):
+            raise RuntimeError(
+                "onnxruntime 不可用，无法初始化 AI 推理。"
+                "若为 exe，请查看 %USERPROFILE%\\.cache\\spine-annotator\\logs\\app.log"
+            )
+
         _log_inference_environment_once()
         try:
             from spine_infer import SpineDetector

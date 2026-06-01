@@ -12,6 +12,7 @@ from typing import List, Optional
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from ..core.inference import ModelManager, SpineInferenceBridge
+from ..core.runtime_bootstrap import ensure_onnxruntime
 from ..core.models import OBBAnnotation
 
 LOGGER = logging.getLogger("spine_annotator.inference")
@@ -96,6 +97,11 @@ class InferenceWorker(QThread):
 
             # 2. 执行推理
             self.progress.emit("正在执行 AI 推理…")
+            if not ensure_onnxruntime(before_qt=False):
+                raise RuntimeError(
+                    "onnxruntime 加载失败，无法执行 AI 推理。"
+                    "请查看 %USERPROFILE%\\.cache\\spine-annotator\\logs\\app.log"
+                )
             LOGGER.info("Initializing inference bridge with model: %s", model_path)
             bridge = SpineInferenceBridge(model_path=model_path)
             LOGGER.info("Running inference for image: %s", self._image_path)
