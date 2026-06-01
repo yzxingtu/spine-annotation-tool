@@ -176,10 +176,14 @@ class SpineInferenceBridge:
         from spine_infer import SpineDetector
 
         self._max_per_category = max_per_category or DEFAULT_MAX_PER_CATEGORY.copy()
+
+        # PyInstaller 打包后 CoreML 可能不兼容，强制使用 CPU
+        device = "cpu" if getattr(sys, "frozen", False) else "auto"
+
         self._detector = SpineDetector(
             weights=str(model_path),
             backend="onnx",
-            device="auto",
+            device=device,
             input_size=input_size,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
