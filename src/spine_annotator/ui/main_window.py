@@ -1,5 +1,6 @@
 """Main application window for the spine annotation tool."""
 
+import logging
 import math
 import os
 from pathlib import Path
@@ -26,6 +27,8 @@ from .image_canvas import AnnotationCanvas, CATEGORY_COLORS
 from .enhancement_panel import EnhancementDialog, EnhancementToolbar
 from .inference_worker import InferenceWorker
 from ..core.inference import ModelManager
+
+LOGGER = logging.getLogger("spine_annotator.inference")
 
 
 class MainWindow(QMainWindow):
@@ -1919,17 +1922,33 @@ class MainWindow(QMainWindow):
         """对当前图片执行 AI 推理，清空画布并填充预标注结果。"""
         # 前置检查
         if not self._image_infos or self._current_index < 0:
+            LOGGER.warning("AI inference aborted: no dataset/image loaded")
             QMessageBox.warning(self, "AI 推理", "请先加载数据集。")
             return
         if self._current_annotation is None:
+            LOGGER.warning("AI inference aborted: current annotation is None")
             return
 
         # 防止重复点击
         if self._inference_worker is not None and self._inference_worker.isRunning():
+            LOGGER.info("AI inference ignored: worker is already running")
             return
 
         info = self._image_infos[self._current_index]
         image_path = info["image_path"]
+        LOGGER.info(
+            "AI inference requested: index=%d, image=%s, split=%s",
+            self._current_index,
+            image_path,
+            info.get("split", ""),
+        )
+        LOGGER.info(
+            "Inference context: dataset_root=%s, output_dir=%s, export_format=%s, existing_annotations=%d",
+            self._dataset_root,
+            self._output_dir,
+            self._export_format,
+            len(self._current_annotation.annotations),
+        )
 
         # 若有未保存的标注，提示确认
         n_existing = len(self._current_annotation.annotations)
@@ -1943,6 +1962,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes,
             )
             if reply != QMessageBox.Yes:
+                LOGGER.info("AI inference cancelled by user confirmation dialog")
                 return
 
         # 禁用推理按钮，显示进度
@@ -1958,9 +1978,11 @@ class MainWindow(QMainWindow):
         self._inference_worker.error.connect(self._on_inference_error)
         self._inference_worker.progress.connect(self._on_inference_progress)
         self._inference_worker.start()
+        LOGGER.info("Inference worker started for image: %s", image_path)
 
     def _on_inference_progress(self, message: str):
         """推理过程中的进度更新。"""
+        LOGGER.info("Inference progress: %s", message)
         self.statusBar().showMessage(message)
 
     def _on_inference_finished(self, annotations: list):
@@ -2017,18 +2039,28 @@ class MainWindow(QMainWindow):
             f"L={cats['lumbar']}, S={cats['sacral']})",
             5000,
         )
+        LOGGER.info(
+            "Inference applied to canvas: total=%d, C=%d, T=%d, L=%d, S=%d",
+            len(annotations),
+            cats["cervical"],
+            cats["thoracic"],
+            cats["lumbar"],
+            cats["sacral"],
+        )
 
     def _on_inference_error(self, error_msg: str):
         """推理失败，显示错误信息。"""
         self._inference_worker = None
         self.statusBar().showMessage("AI 推理失败", 5000)
+        LOGGER.error("Inference failed and returned error:\n%s", error_msg)
         QMessageBox.critical(
             self, "AI 推理失败",
             f"推理过程中发生错误：\n\n{error_msg}\n\n"
             f"请确保：\n"
             f"  1. 已安装 spine-infer 和 onnxruntime\n"
             f"  2. 模型下载地址正确且可访问\n"
-            f"  3. 网络连接正常",
+            f"  3. 网络连接正常\n\n"
+            f"详细堆栈已输出到启动该程序的控制台。",
         )
 
     def _update_progress(self):

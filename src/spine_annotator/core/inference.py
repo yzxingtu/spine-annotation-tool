@@ -7,10 +7,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import platform
 import sys
 import tempfile
+import time
+import traceback
 import urllib.request
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -53,6 +58,42 @@ DEFAULT_MAX_PER_CATEGORY: Dict[str, int] = {
     "L": 5,
     "S": 1,
 }
+
+LOGGER = logging.getLogger("spine_annotator.inference")
+
+
+def _safe_pkg_version(dist_name: str) -> str:
+    """Return installed package version string for diagnostics."""
+    try:
+        return pkg_version(dist_name)
+    except PackageNotFoundError:
+        return "not-installed"
+    except Exception:
+        return "unknown"
+
+
+def _log_inference_environment_once() -> None:
+    """Log runtime environment details helpful for DLL/import issues."""
+    LOGGER.info(
+        "Inference env: exe=%s, cwd=%s, frozen=%s",
+        sys.executable,
+        os.getcwd(),
+        getattr(sys, "frozen", False),
+    )
+    LOGGER.info(
+        "Inference env: platform=%s, release=%s, version=%s, machine=%s",
+        platform.system(),
+        platform.release(),
+        platform.version(),
+        platform.machine(),
+    )
+    LOGGER.info(
+        "Inference deps: spine-infer=%s, onnxruntime=%s",
+        _safe_pkg_version("spine-infer"),
+        _safe_pkg_version("onnxruntime"),
+    )
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    LOGGER.info("PATH head entries: %s", path_entries[:8])
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +145,13 @@ class ModelManager:
             RuntimeError: 下载失败。
         """
         if self.is_model_available():
+            LOGGER.info("Model cache hit: %s", self._model_path)
+            LOGGER.info("Cached model size: %d bytes", self._model_path.stat().st_size)
             return self._model_path
 
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        LOGGER.info("Model cache miss, downloading from %s", self._model_url)
+        LOGGER.info("Model download target: %s", self._model_path)
 
         # 先下载到临时文件，完成后 rename，避免中断导致残留
         tmp_fd, tmp_path_str = tempfile.mkstemp(
@@ -119,7 +164,15 @@ class ModelManager:
         try:
             self._download_file(self._model_url, tmp_path, progress_callback)
             tmp_path.rename(self._model_path)
+            LOGGER.info("Model downloaded successfully: %s", self._model_path)
+            LOGGER.info("Downloaded model size: %d bytes", self._model_path.stat().st_size)
         except Exception:
+            LOGGER.error(
+                "Model download failed: url=%s, tmp=%s\n%s",
+                self._model_url,
+                tmp_path,
+                traceback.format_exc(),
+            )
             # 清理临时文件
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -134,9 +187,11 @@ class ModelManager:
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         """流式下载文件到 dest。"""
+        LOGGER.info("Start downloading model file: %s", url)
         req = urllib.request.Request(url, headers={"User-Agent": "spine-annotator/0.2"})
         with urllib.request.urlopen(req, timeout=120) as resp:
             total = int(resp.headers.get("Content-Length", -1))
+            LOGGER.info("Model response content-length: %s", total)
             downloaded = 0
             chunk_size = 64 * 1024  # 64 KB
 
@@ -149,6 +204,7 @@ class ModelManager:
                     downloaded += len(chunk)
                     if progress_callback:
                         progress_callback(downloaded, total)
+        LOGGER.info("Model file saved: %s", dest)
 
 
 # ---------------------------------------------------------------------------
@@ -173,22 +229,43 @@ class SpineInferenceBridge:
         iou_threshold: float = 0.7,
         input_size: int = MODEL_INPUT_SIZE,
     ) -> None:
-        from spine_infer import SpineDetector
+        _log_inference_environment_once()
+        try:
+            from spine_infer import SpineDetector
+        except Exception:
+            LOGGER.error("Failed to import spine_infer:\n%s", traceback.format_exc())
+            raise
 
         self._max_per_category = max_per_category or DEFAULT_MAX_PER_CATEGORY.copy()
 
         # PyInstaller 打包后 CoreML 可能不兼容，强制使用 CPU
         device = "cpu" if getattr(sys, "frozen", False) else "auto"
 
-        self._detector = SpineDetector(
-            weights=str(model_path),
-            backend="onnx",
-            device=device,
-            input_size=input_size,
-            conf_threshold=conf_threshold,
-            iou_threshold=iou_threshold,
-            num_keypoints=4,
-        )
+        try:
+            LOGGER.info(
+                "Initializing detector: model=%s, backend=onnx, device=%s, input_size=%s, conf=%s, iou=%s",
+                model_path,
+                device,
+                input_size,
+                conf_threshold,
+                iou_threshold,
+            )
+            self._detector = SpineDetector(
+                weights=str(model_path),
+                backend="onnx",
+                device=device,
+                input_size=input_size,
+                conf_threshold=conf_threshold,
+                iou_threshold=iou_threshold,
+                num_keypoints=4,
+            )
+            LOGGER.info("SpineDetector initialized successfully")
+        except Exception:
+            LOGGER.error(
+                "Failed to initialize SpineDetector:\n%s",
+                traceback.format_exc(),
+            )
+            raise
 
     def run_inference(self, image_path: str) -> List[OBBAnnotation]:
         """对单张图执行推理并返回分配好 class_id 的 OBBAnnotation 列表。
@@ -196,7 +273,13 @@ class SpineInferenceBridge:
         返回的列表按解剖序排列（C7, T1..T12, L1..L5, S1），
         可直接赋值给 ``ImageAnnotation.annotations``。
         """
-        result = self._detector.predict(image_path)
+        start_ts = time.perf_counter()
+        LOGGER.info("Predict start: image=%s", image_path)
+        try:
+            result = self._detector.predict(image_path)
+        except Exception:
+            LOGGER.error("Detector predict failed:\n%s", traceback.format_exc())
+            raise
 
         # 按 SDK 类别分组
         grouped: Dict[str, list] = {"C": [], "T": [], "L": [], "S": []}
@@ -214,6 +297,14 @@ class SpineInferenceBridge:
             # 再按 bbox y1 升序（从上到下，对应解剖序）
             dets.sort(key=lambda d: d.y1)
             filtered.extend([(cat, d) for d in dets])
+        LOGGER.info(
+            "Raw detections grouped count: C=%d T=%d L=%d S=%d, filtered_total=%d",
+            len(grouped["C"]),
+            len(grouped["T"]),
+            len(grouped["L"]),
+            len(grouped["S"]),
+            len(filtered),
+        )
 
         # 映射为 OBBAnnotation
         annotations: List[OBBAnnotation] = []
@@ -255,4 +346,6 @@ class SpineInferenceBridge:
             )
             annotations.append(ann)
 
+        LOGGER.info("Predict done: output_annotations=%d", len(annotations))
+        LOGGER.info("Predict elapsed: %.3f s", time.perf_counter() - start_ts)
         return annotations
