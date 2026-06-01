@@ -106,20 +106,22 @@ jobs:
           pyinstaller --noconfirm --clean \
             --name "X光脊柱标注工具" \
             --windowed \
-            --onefile \
             --paths src \
             --collect-submodules spine_annotator \
             --collect-all onnxruntime \
             --additional-hooks-dir hooks \
             main.py
 
-      - name: 重命名 Windows 产物
+      - name: 压缩 Windows 产物
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
           cd dist
-          mv "X光脊柱标注工具.exe" "X光脊柱标注工具 v${{ needs.verify-version.outputs.version }}-windows.exe"
-          ls -la
+          $folder = "X光脊柱标注工具"
+          $version = "${{ needs.verify-version.outputs.version }}"
+          $zipName = "X光脊柱标注工具 v$version-windows.zip"
+          Compress-Archive -Path $folder -DestinationPath $zipName -Force
+          Get-ChildItem
 
       # ---------- macOS 打包 ----------
       - name: 打包 macOS (.app)
@@ -161,7 +163,7 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: |
-            dist/X光脊柱标注工具 *-windows.exe
+            dist/X光脊柱标注工具 *-windows.zip
             dist/X光脊柱标注工具 *-macos.zip
           if-no-files-found: ignore
           retention-days: 7
@@ -185,7 +187,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/X光脊柱标注工具 *-windows.exe
+            artifacts/**/X光脊柱标注工具 *-windows.zip
             artifacts/**/X光脊柱标注工具 *-macos.zip
           generate_release_notes: true
           name: "X光脊柱标注工具 v${{ needs.verify-version.outputs.version }}"
@@ -194,7 +196,7 @@ jobs:
             ## 下载与使用
 
             ### Windows
-            直接下载 `X光脊柱标注工具 *-windows.exe` 双击运行。
+            下载 `X光脊柱标注工具 *-windows.zip` 解压后，双击 `X光脊柱标注工具.exe` 运行。
             
             ### macOS
             本包采用 **ad-hoc 签名**（未经 Apple 公证）。首次打开会提示"无法验证开发者"，请按以下任一方式处理：
