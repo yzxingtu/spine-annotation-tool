@@ -210,6 +210,32 @@ class OBBAnnotation:
         return (self.center.x, self.center.y, self.width, self.height, self.angle)
 
 
+def auto_sort_annotations(annotations: List[OBBAnnotation]) -> List[OBBAnnotation]:
+    """按标注框中心 Y 坐标（从上到下）自动排序并分配椎骨编号。
+
+    逻辑：
+    1. 将所有标注按 center.y 升序排列（脊柱从上到下）
+    2. 按解剖顺序依次分配 class_id：C7(0) → T1(1) → T2(2) → ... → L5(17) → S1(18)
+    3. 仅对 obb 和 line 类型标注分配编号
+
+    Returns:
+        排序后的标注列表（class_id 和 class_name 已更新）
+    """
+    # 按 center.y 升序排列（脊柱从上到下）
+    sorted_anns = sorted(annotations, key=lambda a: a.center.y)
+
+    # 按解剖顺序分配编号
+    ordered_class_ids = list(VERTEBRA_CLASSES.keys())  # [0, 1, 2, ..., 18]
+
+    for i, ann in enumerate(sorted_anns):
+        if i < len(ordered_class_ids):
+            new_class_id = ordered_class_ids[i]
+            ann.class_id = new_class_id
+            ann.class_name = VERTEBRA_CLASSES[new_class_id]
+
+    return sorted_anns
+
+
 @dataclass
 class ImageAnnotation:
     """All annotations for a single image."""

@@ -21,7 +21,8 @@ from ..core.converter import YOLOConverter
 from ..core.image_enhancer import EnhanceParams
 from ..core.models import (
     ImageAnnotation, OBBAnnotation, VERTEBRA_CLASSES,
-    VertebraCategory, get_vertebra_category, get_vertebra_class_id,
+    VertebraCategory, auto_sort_annotations,
+    get_vertebra_category, get_vertebra_class_id,
 )
 from .image_canvas import AnnotationCanvas, CATEGORY_COLORS
 from .enhancement_panel import EnhancementDialog, EnhancementToolbar
@@ -230,6 +231,15 @@ class MainWindow(QMainWindow):
         self._btn_relabel_ann.clicked.connect(self._relabel_selected_annotation)
         self._btn_relabel_ann.setEnabled(False)
         right_layout.addWidget(self._btn_relabel_ann)
+
+        # Auto-sort / auto-renumber button
+        self._btn_auto_sort = QPushButton("自动排序")
+        self._btn_auto_sort.setToolTip(
+            "按 Y 坐标从上到下自动排序并重编号 (C7→T1→...→L5→S1)\n"
+            "快捷键：Ctrl+Shift+S"
+        )
+        self._btn_auto_sort.clicked.connect(self._auto_sort_annotations)
+        right_layout.addWidget(self._btn_auto_sort)
 
         # Clear current image annotations (高危操作，红色醒目 + 二次确认)
         self._btn_clear_current = QPushButton("⚠️ 清空当前图片")
@@ -562,6 +572,7 @@ class MainWindow(QMainWindow):
             ("标注编辑", [
                 ("B",                 "进入/退出矩形绘制模式"),
                 ("双击标注",            "修改椎骨编号"),
+                ("Ctrl+Shift+S",     "自动排序 / 重编号 (C7→T1→...→S1)"),
                 ("Del",               "删除选中标注"),
                 ("Esc",               "取消选中 / 退出绘制模式"),
                 ("F",                 "适配画布 (Fit)"),
@@ -653,6 +664,7 @@ class MainWindow(QMainWindow):
             QKeySequence("Delete"): self._delete_selected_annotation,
             # 绘制模式切换：矩形（再按一次退出绘制）
             QKeySequence("B"): self._toggle_rect_shortcut,
+            QKeySequence("Ctrl+Shift+S"): self._auto_sort_annotations,
             # 清空当前图片（高危，需二次确认）
             QKeySequence("Ctrl+Shift+Backspace"): self._clear_current_image,
             # 标记难点
@@ -1383,6 +1395,46 @@ class MainWindow(QMainWindow):
             self._apply_item_style(self._current_index)
 
         self.statusBar().showMessage(f"编号已更改为 {ann.class_name}", 2000)
+
+    def _auto_sort_annotations(self):
+        """按 Y 坐标从上到下自动排序并重编号所有标注 (C7→T1→...→L5→S1)。"""
+        if not self._current_annotation:
+            return
+
+        annotations = self._current_annotation.annotations
+        if not annotations:
+            return
+
+        # 二次确认（重编号会覆盖现有编号，需用户明确同意）
+        reply = QMessageBox.question(
+            self, "确认自动排序",
+            f"当前图片共有 {len(annotations)} 个标注。\n\n"
+            "自动排序将按 Y 坐标从上到下重新分配编号：\n"
+            "C7(0) → T1(1) → T2(2) → ... → L5(17) → S1(18)\n\n"
+            "现有编号将被覆盖，是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 执行排序并重编号
+        sorted_anns = auto_sort_annotations(annotations)
+        self._current_annotation.annotations = sorted_anns
+        self._current_annotation.modified = True
+
+        # 刷新画布
+        self._canvas.reload_annotations(sorted_anns)
+        self._apply_layer_visibility()
+
+        self._update_status()
+        if self._current_index >= 0:
+            self._apply_item_style(self._current_index)
+
+        self.statusBar().showMessage(
+            f"自动排序完成：{len(sorted_anns)} 个标注已按解剖顺序重编号",
+            3000,
+        )
 
     # --- Save Operations ---
 
