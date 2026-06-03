@@ -113,6 +113,7 @@ class YOLOConverter:
 
             for img_path in sorted(images_dir.glob("*.jpg")):
                 img_abs = str(img_path.resolve())
+                img_rel = str(img_path.resolve().relative_to(root.resolve())).replace("\\", "/")
                 label_path = labels_dir / (img_path.stem + ".txt")
 
                 # Get image dimensions without loading full pixel data
@@ -125,6 +126,7 @@ class YOLOConverter:
 
                 result.append({
                     "image_path": img_abs,
+                    "rel_path": img_rel,
                     "label_path": str(label_path) if label_path.exists() else None,
                     "width": w_img,
                     "height": h_img,
@@ -137,6 +139,69 @@ class YOLOConverter:
     # cache 中存放元信息（如 last_image_path）的特殊 key，
     # 以双下划线包围避免与真实图片路径冲突
     META_KEY = "__meta__"
+
+    @staticmethod
+    def migrate_cache_to_rel_paths(cache: dict, image_infos: list) -> dict:
+        """将旧版绝对路径 cache key 迁移为相对路径（rel_path）。
+
+        兼容处理：
+        - 旧 cache 使用绝对路径（如 D:/dataset/train/images/001.jpg）
+        - 新 cache 使用相对于数据集根目录的路径（如 train/images/001.jpg）
+        - 通过文件名匹配进行迁移
+        - 同时处理 __meta__.last_image_path 中的绝对路径
+
+        Returns:
+            迁移后的 cache（若无变化则原样返回）
+        """
+        import os
+        if not cache:
+            return cache
+
+        # 检测是否存在旧格式：顶层绝对路径 key 或 __meta__.last_image_path 为绝对路径
+        has_old_keys = any(
+            os.path.isabs(k) for k in cache if k != YOLOConverter.META_KEY
+        )
+        meta = cache.get(YOLOConverter.META_KEY, {})
+        last_path = meta.get("last_image_path", "") if isinstance(meta, dict) else ""
+        has_old_meta = bool(last_path) and os.path.isabs(last_path)
+
+        if not has_old_keys and not has_old_meta:
+            return cache
+
+        # 建立文件名 → rel_path 的映射（处理同名冲突时取第一个）
+        stem_to_rel: dict[str, str] = {}
+        for info in image_infos:
+            stem = Path(info["image_path"]).stem
+            stem_to_rel.setdefault(stem, info["rel_path"])
+
+        new_cache: dict = {}
+        migrated_count = 0
+        for key, value in cache.items():
+            if key == YOLOConverter.META_KEY:
+                # last_image_path 也迁移为相对路径
+                if isinstance(value, dict) and "last_image_path" in value:
+                    old_path = value["last_image_path"]
+                    stem = Path(old_path).stem
+                    if stem in stem_to_rel:
+                        value = dict(value)
+                        value["last_image_path"] = stem_to_rel[stem]
+                        migrated_count += 1
+                    elif os.path.isabs(old_path):
+                        # 找不到匹配文件：清除绝对路径，避免断点续标跳转失败
+                        value = dict(value)
+                        value.pop("last_image_path", None)
+                        migrated_count += 1
+                new_cache[key] = value
+            elif os.path.isabs(key):
+                stem = Path(key).stem
+                if stem in stem_to_rel:
+                    new_cache[stem_to_rel[stem]] = value
+                    migrated_count += 1
+                # 找不到匹配的文件则丢弃旧 key
+            else:
+                new_cache[key] = value
+
+        return new_cache
 
     def load_single(self, image_path: str, label_path: Optional[str],
                     img_w: int, img_h: int,

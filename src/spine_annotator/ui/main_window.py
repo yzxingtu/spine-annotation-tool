@@ -727,6 +727,11 @@ class MainWindow(QMainWindow):
         # Load progress cache
         self._cache = self._converter.load_progress_cache(self._progress_cache_path)
 
+        # 迁移旧版绝对路径 cache key 为相对路径（兼容旧数据）
+        self._cache = self._converter.migrate_cache_to_rel_paths(
+            self._cache, self._image_infos
+        )
+
         # 重置检测结果（新数据集加载时清空旧的警告标记）
         self._count_check_failed.clear()
 
@@ -800,32 +805,32 @@ class MainWindow(QMainWindow):
         last_index = -1
         if last_path:
             for i, info in enumerate(self._image_infos):
-                if info["image_path"] == last_path:
+                if info["rel_path"] == last_path:
                     last_index = i
                     break
 
         # 优先：上次位置且未标注
-        if last_index >= 0 and not self._is_saved(self._image_infos[last_index]["image_path"]):
+        if last_index >= 0 and not self._is_saved(self._image_infos[last_index]["rel_path"]):
             return last_index
 
         # 其次：第一张未标注
         for i, info in enumerate(self._image_infos):
-            if not self._is_saved(info["image_path"]):
+            if not self._is_saved(info["rel_path"]):
                 return i
 
         # 兜底：全部已标注 → 上次位置或第一张
         return last_index if last_index >= 0 else 0
 
-    def _is_saved(self, image_path: str) -> bool:
-        return bool(self._cache.get(image_path, {}).get("saved"))
+    def _is_saved(self, rel_path: str) -> bool:
+        return bool(self._cache.get(rel_path, {}).get("saved"))
 
-    def _is_flagged(self, image_path: str) -> bool:
+    def _is_flagged(self, rel_path: str) -> bool:
         """检查图片是否被标记为标注难点。"""
-        return bool(self._cache.get(image_path, {}).get("flagged"))
+        return bool(self._cache.get(rel_path, {}).get("flagged"))
 
-    def _set_flagged(self, image_path: str, flagged: bool):
+    def _set_flagged(self, rel_path: str, flagged: bool):
         """设置/取消标记难点。"""
-        entry = self._cache.setdefault(image_path, {})
+        entry = self._cache.setdefault(rel_path, {})
         entry["flagged"] = flagged
         # 持久化到 cache 文件
         if self._progress_cache_path:
@@ -835,8 +840,8 @@ class MainWindow(QMainWindow):
         """标记难点按钮切换回调。"""
         if self._current_index < 0 or not self._image_infos:
             return
-        img_path = self._image_infos[self._current_index]["image_path"]
-        self._set_flagged(img_path, checked)
+        rel_path = self._image_infos[self._current_index]["rel_path"]
+        self._set_flagged(rel_path, checked)
         self._apply_item_style(self._current_index)
         self._update_status()
 
@@ -847,8 +852,8 @@ class MainWindow(QMainWindow):
             return
 
         row = self._image_list_widget.row(item)
-        img_path = self._image_infos[row]["image_path"]
-        is_flagged = self._is_flagged(img_path)
+        rel_path = self._image_infos[row]["rel_path"]
+        is_flagged = self._is_flagged(rel_path)
 
         menu = QMenu(self)
         flag_action = QAction(
@@ -866,9 +871,9 @@ class MainWindow(QMainWindow):
 
     def _toggle_flag_by_row(self, row: int):
         """根据行号切换标记难点状态。"""
-        img_path = self._image_infos[row]["image_path"]
-        new_flag = not self._is_flagged(img_path)
-        self._set_flagged(img_path, new_flag)
+        rel_path = self._image_infos[row]["rel_path"]
+        new_flag = not self._is_flagged(rel_path)
+        self._set_flagged(rel_path, new_flag)
         self._apply_item_style(row)
         # 如果是当前图片，同步按钮状态
         if row == self._current_index:
@@ -923,14 +928,14 @@ class MainWindow(QMainWindow):
         info = self._image_infos[index]
 
         # Lazy load annotations for this image
-        cache_entry = self._cache.get(info["image_path"])
+        cache_entry = self._cache.get(info["rel_path"])
         self._current_annotation = self._converter.load_single(
             info["image_path"], info["label_path"], info["width"], info["height"],
             cache_entry=cache_entry,
         )
 
         # 加载到画布前，先从 cache 读出该图的增强参数并同步到 canvas / toolbar
-        enhance_params = self._load_enhance_params_for(info["image_path"])
+        enhance_params = self._load_enhance_params_for(info["rel_path"])
         self._canvas.set_enhance_params(enhance_params)
         self._enhance_toolbar.sync_from_params(enhance_params)
         if self._enhance_dialog is not None and self._enhance_dialog.isVisible():
@@ -946,7 +951,7 @@ class MainWindow(QMainWindow):
 
         # 记录最后访问位置 + 落盘（便于断点续标）
         if self._progress_cache_path:
-            self._converter.set_last_image_path(self._cache, info["image_path"])
+            self._converter.set_last_image_path(self._cache, info["rel_path"])
             self._converter.save_progress_cache(self._progress_cache_path, self._cache)
 
         # 切换前后两行的视觉样式（更新加粗状态）
@@ -955,7 +960,7 @@ class MainWindow(QMainWindow):
         self._apply_item_style(index)
 
         # 同步标记难点按钮状态
-        is_flagged = self._is_flagged(info["image_path"])
+        is_flagged = self._is_flagged(info["rel_path"])
         self._btn_flag.blockSignals(True)
         self._btn_flag.setChecked(is_flagged)
         self._btn_flag.blockSignals(False)
@@ -1503,8 +1508,8 @@ class MainWindow(QMainWindow):
             self._converter.save_pose_yolov8(self._current_annotation, out_dir, overwrite=True)
 
         # Update cache (含每个标注的 keypoint_visibility 状态)
-        img_path = info["image_path"]
-        self._cache[img_path] = {
+        rel_path = info["rel_path"]
+        self._cache[rel_path] = {
             "modified": False,
             "saved": True,
             "annotation_states": self._converter.build_annotation_states(
@@ -1522,7 +1527,7 @@ class MainWindow(QMainWindow):
         self._update_status()
 
         if not silent:
-            self.statusBar().showMessage(f"已保存: {Path(img_path).name}")
+            self.statusBar().showMessage(f"已保存: {Path(info['image_path']).name}")
 
     def _checkpoint_geometry_to_cache(self):
         """把当前张 OBB 几何写入 cache（不算正式保存，仅防止编辑丢失）。
@@ -1533,8 +1538,8 @@ class MainWindow(QMainWindow):
         if not (self._current_annotation and self._progress_cache_path):
             return
         info = self._image_infos[self._current_index]
-        img_path = info["image_path"]
-        existing = self._cache.get(img_path, {})
+        rel_path = info["rel_path"]
+        existing = self._cache.get(rel_path, {})
         existing.update({
             # 注意：不改 saved 字段（仍保持 false / 之前的值），仅记录几何
             "annotation_states": self._converter.build_annotation_states(
@@ -1544,14 +1549,14 @@ class MainWindow(QMainWindow):
         # 如果之前没有 saved 字段，确保至少有个 false
         existing.setdefault("saved", False)
         existing["modified"] = True
-        self._cache[img_path] = existing
+        self._cache[rel_path] = existing
         self._converter.save_progress_cache(self._progress_cache_path, self._cache)
 
     # ---------------- 图像增强（不修改原图，仅辅助显示） ----------------
 
-    def _load_enhance_params_for(self, img_path: str) -> EnhanceParams:
+    def _load_enhance_params_for(self, rel_path: str) -> EnhanceParams:
         """从 cache 读出该图的增强参数，不存在返回默认。"""
-        entry = self._cache.get(img_path, {})
+        entry = self._cache.get(rel_path, {})
         return EnhanceParams.from_dict(entry.get("enhance_params", {}))
 
     def _persist_enhance_params_for_current(self):
@@ -1559,10 +1564,10 @@ class MainWindow(QMainWindow):
         if not self._image_infos or self._current_index < 0 or not self._progress_cache_path:
             return
         info = self._image_infos[self._current_index]
-        img_path = info["image_path"]
+        rel_path = info["rel_path"]
         cur_params = self._canvas.get_enhance_params()
         cur_dict = cur_params.to_dict()
-        existing = self._cache.get(img_path, {})
+        existing = self._cache.get(rel_path, {})
         old_dict = existing.get("enhance_params")
         if old_dict == cur_dict:
             return  # 无变化，跳过写盘
@@ -1574,7 +1579,7 @@ class MainWindow(QMainWindow):
                 return
         else:
             existing["enhance_params"] = cur_dict
-        self._cache[img_path] = existing
+        self._cache[rel_path] = existing
         self._converter.save_progress_cache(self._progress_cache_path, self._cache)
 
     def _open_enhance_dialog(self):
@@ -1644,9 +1649,9 @@ class MainWindow(QMainWindow):
         skipped_min_count = 0
         skipped_max_count = 0
         for i, info in enumerate(self._image_infos):
-            img_path = info["image_path"]
+            rel_path = info["rel_path"]
             label_path = info.get("label_path")
-            cache_entry = self._cache.get(img_path, {})
+            cache_entry = self._cache.get(rel_path, {})
 
             is_current = (i == self._current_index)
             has_label = bool(label_path) and Path(label_path).exists()
@@ -1678,7 +1683,7 @@ class MainWindow(QMainWindow):
                 ann = self._converter.load_single(
                     info["image_path"], label_path,
                     info["width"], info["height"],
-                    cache_entry=self._cache.get(img_path),
+                    cache_entry=self._cache.get(rel_path),
                 )
 
             if ann is None:
@@ -1719,7 +1724,7 @@ class MainWindow(QMainWindow):
                 "saved": True,
                 "annotation_states": self._converter.build_annotation_states(ann),
             })
-            self._cache[img_path] = updated
+            self._cache[rel_path] = updated
             count += 1
 
         # Save cache
@@ -1877,7 +1882,7 @@ class MainWindow(QMainWindow):
             self._current_annotation = self._converter.load_single(
                 info["image_path"], info["label_path"],
                 info["width"], info["height"],
-                cache_entry=self._cache.get(info["image_path"]),
+                cache_entry=self._cache.get(info["rel_path"]),
             )
             self._canvas.load_image(
                 info["image_path"], self._current_annotation.annotations
@@ -1943,9 +1948,9 @@ class MainWindow(QMainWindow):
         )
 
         # 2. 删除缓存条目
-        img_path = info["image_path"]
-        if img_path in self._cache:
-            del self._cache[img_path]
+        rel_path = info["rel_path"]
+        if rel_path in self._cache:
+            del self._cache[rel_path]
         if self._progress_cache_path:
             self._converter.save_progress_cache(self._progress_cache_path, self._cache)
 
@@ -1953,7 +1958,7 @@ class MainWindow(QMainWindow):
         deleted_label = False
         if self._output_dir:
             split = info.get("split", "")
-            stem = Path(img_path).stem
+            stem = Path(info["image_path"]).stem
             deleted_label = self._converter.clear_label_for(stem, self._output_dir, split)
 
         # 4. 刷新 UI
@@ -2061,8 +2066,8 @@ class MainWindow(QMainWindow):
         self._apply_layer_visibility()
 
         # 更新 cache
-        img_path = info["image_path"]
-        self._cache[img_path] = {
+        rel_path = info["rel_path"]
+        self._cache[rel_path] = {
             "annotation_states": self._converter.build_annotation_states(
                 self._current_annotation
             ),
@@ -2226,8 +2231,8 @@ class MainWindow(QMainWindow):
         failed = 0
 
         for i, info in enumerate(self._image_infos):
-            img_path = info["image_path"]
-            is_saved = self._is_saved(img_path)
+            rel_path = info["rel_path"]
+            is_saved = self._is_saved(rel_path)
 
             # 根据筛选条件决定是否检测
             if is_saved and not check_annotated:
@@ -2237,7 +2242,7 @@ class MainWindow(QMainWindow):
 
             # 计算标注数量
             # 优先读 cache annotation_states；其次从磁盘加载 label
-            cache_entry = self._cache.get(img_path, {})
+            cache_entry = self._cache.get(rel_path, {})
             states = cache_entry.get("annotation_states")
             if states is not None:
                 ann_count = len(states)
@@ -2245,7 +2250,7 @@ class MainWindow(QMainWindow):
                 # 从磁盘 label 文件读取（受 _load_labels 19 个上限保护）
                 try:
                     ann = self._converter.load_single(
-                        img_path, info["label_path"],
+                        info["image_path"], info["label_path"],
                         info["width"], info["height"],
                         cache_entry=None,
                     )
@@ -2292,15 +2297,15 @@ class MainWindow(QMainWindow):
             return
     
         info = self._image_infos[index]
-        img_path = info["image_path"]
+        rel_path = info["rel_path"]
         is_current = (index == self._current_index)
         is_modified = (
             is_current
             and self._current_annotation is not None
             and self._current_annotation.modified
         )
-        is_saved = self._is_saved(img_path)
-        is_flagged = self._is_flagged(img_path)
+        is_saved = self._is_saved(rel_path)
+        is_flagged = self._is_flagged(rel_path)
         is_count_failed = index in self._count_check_failed
     
         # 更新显示文本（加前缀表示特殊状态）

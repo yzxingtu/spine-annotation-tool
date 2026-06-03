@@ -1,4 +1,4 @@
-# Local Windows build (aligned with CI: numpy<2 + onnxruntime 1.17.3)
+﻿# Local Windows build (aligned with CI: numpy<2 + onnxruntime 1.17.3)
 # Usage: .\scripts\build_windows.ps1
 # Close any running "X光脊柱标注工具.exe" before building (dist folder lock).
 
@@ -46,3 +46,4 @@ if (Test-Path $Exe) {
 } else {
     Write-Error "exe not found under dist. Check PyInstaller output."
 }
+
