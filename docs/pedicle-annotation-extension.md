@@ -115,34 +115,31 @@ pedicles: PedicleAnnotation = field(default_factory=PedicleAnnotation)
 
 ## 导出格式
 
-不建议把椎弓根塞进现有 `YOLOv8-pose (bbox + 4 关键点)`，因为该格式已经服务于椎骨四角点训练。建议新增导出项：
+不建议把椎弓根塞进现有 `YOLOv8-pose (bbox + 4 关键点)`，因为该格式已经服务于椎骨四角点训练。
+
+也不建议只导出 `cx cy w h` 水平外接框。`cx cy w h` 是 AABB，不包含椎骨旋转角度；如果椎弓根模型训练时看不到椎体 OBB 的 4 个角点，会丢失椎骨倾斜和旋转框几何，影响后续按椎体参考系学习左右椎弓根位置。
+
+建议新增专用导出项：
 
 ```text
-YOLOv8-pose (pedicle 2 keypoints)
+OBB + pedicle keypoints
 ```
 
 每行对应一节椎骨：
 
 ```text
-class_id cx cy w h left_x left_y left_v right_x right_y right_v
+class_id x1 y1 x2 y2 x3 y3 x4 y4 left_x left_y left_v right_x right_y right_v
 ```
 
 字段说明：
 
 - `class_id`：继续沿用导出折叠规则，C7-L5 为 `0`，S1 为 `1`。如果 S1 不参与椎弓根训练，可在导出时跳过 S1。
-- `cx cy w h`：椎骨 OBB 四点外接 AABB，归一化到 `[0, 1]`。
+- `x1 y1 x2 y2 x3 y3 x4 y4`：椎骨 OBB 四角点，顺时针排列，归一化到 `[0, 1]`，语义与现有 `YOLOv8-OBB (四角点)` 一致。
 - `left_x left_y left_v`：图像左侧椎弓根中心点与可见性。
 - `right_x right_y right_v`：图像右侧椎弓根中心点与可见性。
 - 当 `v=0` 且没有中心点时，坐标可写 `0 0 0`，训练前也可以过滤不可见点。
 
-对应 YOLO 数据集配置：
-
-```yaml
-names:
-  0: vertebra
-  1: S1
-kpt_shape: [2, 3]
-```
+该格式每行固定 `1 + 8 + 6 = 15` 个字段。它是本项目的训练中间格式，不是原生 YOLOv8-pose 格式；训练脚本可以在读取时用 OBB 四角点生成单节椎骨 ROI、椎体局部坐标系或外接 AABB，再监督左右椎弓根点位。
 
 如果训练时不需要 S1，建议导出函数提供选项：`include_s1=False`。
 
@@ -182,9 +179,9 @@ Nash-Moe 0-4 级生成
 
 ### 阶段 2：导出
 
-- 新增 `save_pedicle_pose_yolov8()`。
+- 新增 `save_pedicle_obb_keypoints()`。
 - 导出格式新增到下拉框和 `_on_format_changed()`。
-- 单张保存和全部导出都支持 pedicle pose。
+- 单张保存和全部导出都支持 OBB + pedicle keypoints。
 - README 补充新格式说明。
 
 ### 阶段 3：AI 辅助
@@ -199,7 +196,7 @@ Nash-Moe 0-4 级生成
 2. 每节椎骨可独立标注图像左/右椎弓根中心点。
 3. 左右椎弓根可见性可独立设置并可持久化。
 4. 切图、关闭重开后，椎弓根点和可见性完整恢复。
-5. 新增 pedicle pose 导出格式，输出字段数量固定为 11。
+5. 新增 OBB + pedicle keypoints 导出格式，输出字段数量固定为 15。
 6. `v=0` 的点允许无中心点，不阻塞保存。
 7. 导出的坐标均 clamp 到 `[0, 1]`。
 8. 现有 OBB、xywhr、4 角点 pose 导出不受影响。

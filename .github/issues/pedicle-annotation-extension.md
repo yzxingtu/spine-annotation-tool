@@ -34,15 +34,15 @@
 2. 左右侧别统一定义为 `image_left` / `image_right`。
 3. 左右可见性独立保存，使用 YOLO pose 风格 `0/1/2`。
 4. 新增画布点位渲染和编辑交互。
-5. 新增专用导出格式 `YOLOv8-pose (pedicle 2 keypoints)`。
+5. 新增专用导出格式 `OBB + pedicle keypoints`，保留椎骨 4 角点旋转几何。
 
 推荐导出格式：
 
 ```text
-class_id cx cy w h left_x left_y left_v right_x right_y right_v
+class_id x1 y1 x2 y2 x3 y3 x4 y4 left_x left_y left_v right_x right_y right_v
 ```
 
-其中 `kpt_shape: [2, 3]`。
+其中 `x1 y1 ... x4 y4` 为椎骨 OBB 四角点，顺时针排列，归一化到 `[0, 1]`。该格式每行固定 `1 + 8 + 6 = 15` 个字段，是本项目的训练中间格式，不是原生 YOLOv8-pose 格式。
 
 ## 实现任务
 
@@ -53,8 +53,8 @@ class_id cx cy w h left_x left_y left_v right_x right_y right_v
 - [ ] 支持拖拽微调已有椎弓根点。
 - [ ] 右侧面板新增“椎弓根标注”区域，支持侧别和可见性切换。
 - [ ] 支持清除当前选中椎骨的左/右椎弓根点。
-- [ ] 新增 pedicle pose 导出函数。
-- [ ] 导出格式下拉框新增 `YOLOv8-pose (pedicle 2 keypoints)`。
+- [ ] 新增 `OBB + pedicle keypoints` 导出函数。
+- [ ] 导出格式下拉框新增 `OBB + pedicle keypoints`。
 - [ ] 单张保存和全部导出接入新格式。
 - [ ] README 增补椎弓根标注操作和导出格式说明。
 - [ ] 增加基础单元测试或手工 QA checklist。
@@ -66,7 +66,7 @@ class_id cx cy w h left_x left_y left_v right_x right_y right_v
 - [ ] 每节椎骨可以独立保存左右椎弓根点和可见性。
 - [ ] 切图、关闭重开后，椎弓根标注完整恢复。
 - [ ] `v=0` 的椎弓根允许无中心点，不阻塞保存。
-- [ ] 新导出格式每行固定 11 个字段。
+- [ ] 新导出格式每行固定 15 个字段。
 - [ ] 导出坐标归一化并 clamp 到 `[0, 1]`。
 
 ## 注意事项
