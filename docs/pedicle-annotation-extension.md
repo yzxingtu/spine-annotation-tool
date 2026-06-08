@@ -1,162 +1,259 @@
-# 左右椎弓根中心点与可见性标注扩展设计
+# 单椎骨椎弓根中心点与可见性标注扩展设计
 
 ## 背景
 
-当前 `spine-annotation-tool` 已支持脊柱 X 光片椎骨 OBB / 4 角点 pose 标注，并已接入椎骨关键点模型进行 AI 预标注。现有椎骨关键点模型已经能够稳定识别每一节椎骨外框、支撑 Cobb 角计算与弯型推导，因此后续椎弓根模型不需要承担整片方向、弯型、凸侧或 Nash-Moe 分级判断。
+当前 `spine-annotation-tool` 已支持整张脊柱 X 光片的椎骨 OBB / 4 角点 pose 标注，并已接入椎骨关键点模型做 AI 预标注。现有模型已经能够稳定输出每节椎骨的 AABB、OBB、编号，并支撑 Cobb 角和弯型推导。
 
-新需求的训练目标应收敛为局部结构识别：
+因此椎弓根专用模型不应重复识别整张 X 光片中的所有椎骨。更合适的拆分是：
 
-- 输入：单节椎骨 ROI 或带椎骨框上下文的整片图像。
-- 输出：图像左侧椎弓根中心点、图像右侧椎弓根中心点、左右独立可见性。
+```text
+整图脊柱模型：识别每节椎骨 AABB / OBB / 编号，并负责 Cobb 角、弯型等上层推导
+椎弓根模型：只识别单节椎骨 crop 图中的左右椎弓根中心点和可见性
+```
 
-AP/PA、图像左右到患者左右的映射、右胸弯/左腰弯、凸侧椎弓根、椎弓根偏移比例、Nash-Moe 0-4 级均由上层软件基于已有椎骨框和业务规则推导。
+该方案可以降低训练难度，减少与现有脊柱模型的功能重复，并让椎弓根模型专注于局部结构。
+
+## 当前软件调查结论
+
+当前项目结构里与本需求相关的关键点：
+
+- `src/spine_annotator/core/models.py`：核心数据结构为 `ImageAnnotation` 和 `OBBAnnotation`，每个 `OBBAnnotation` 表示整图上的一节椎骨。
+- `src/spine_annotator/core/converter.py`：负责读取整图 YOLO 数据集、恢复缓存、导出 OBB / xywhr / 4 角点 pose。
+- `src/spine_annotator/ui/image_canvas.py`：画布以整张 X 光片为背景，叠加多个椎骨 OBB 标注。
+- `src/spine_annotator/ui/main_window.py`：管理整图数据集、AI 预标注、保存、全部导出和进度缓存。
+- `src/spine_annotator/core/inference.py`：AI 预标注会把整图推理结果转换成 `OBBAnnotation`。
+
+当前软件还没有：
+
+- 基于椎骨 AABB 批量裁剪单椎骨图片的工具链。
+- 单椎骨 crop 图片的数据集视图。
+- 单椎骨 crop 图片上的左右椎弓根点标注模式。
+- 单椎骨椎弓根标签导出格式。
+
+因此本次扩展应新增一条独立工作流，不破坏现有整图 OBB 标注和导出。
 
 ## 设计原则
 
-1. 不改动既有椎骨 OBB / 4 角点 pose 标注语义，避免影响已完成的椎骨关键点训练数据。
-2. 椎弓根标注作为每个椎骨标注的附属字段保存，不新增独立椎骨对象。
-3. 标注侧别使用 `image_left` / `image_right`，不在该模型内处理 `patient_left` / `patient_right`。
-4. 左右椎弓根可见性相互独立，不复用现有 `keypoint_visibility` 字段。
-5. 不强制不可见椎弓根标中心点；不可定位时坐标可为空，导出训练格式时按 YOLO pose 规则写占位坐标和 `v=0`。
+1. 不修改原始 X 光片，不覆盖原始整图 label。
+2. 不改变现有 OBB / xywhr / 4 角点 pose 导出语义。
+3. 用现有模型或现有标注中的椎骨 AABB 自动生成单椎骨 crop 图片。
+4. crop 使用 AABB，不做旋转矫正，保持原图方向，避免左右语义混乱。
+5. 椎弓根标注只在单椎骨 crop 图上完成。
+6. 椎弓根模型只输出 crop 图像坐标系下的 `image_left` / `image_right` 点位和可见性。
+7. AP/PA、患者左右、凸侧/凹侧、Nash-Moe 分级仍由上层软件处理。
 
-## 数据模型扩展
+## 新工作流
 
-建议在 `src/spine_annotator/core/models.py` 中新增椎弓根数据结构：
+### 1. 生成单椎骨 crop 数据集
+
+在整图数据集加载完成后，新增菜单或工具入口：
+
+```text
+工具 -> 生成椎弓根 crop 数据集
+```
+
+输入来源可以有两种：
+
+- 使用当前整图标注中的椎骨框。
+- 对未标注整图先运行现有 AI 椎骨模型，得到每节椎骨 AABB / OBB / 编号后再裁剪。
+
+裁剪规则：
+
+```text
+crop_box = AABB 按比例扩大 padding 后得到的矩形
+```
+
+建议默认参数：
+
+- `padding_ratio = 0.15`，可在 UI 中调整为 0-0.30。
+- crop 超出原图边界时 clamp 到图像范围内。
+- 不对 crop 做旋转矫正。
+- 原图只读，裁剪结果另存到新目录。
+
+### 2. crop 数据集目录结构
+
+建议生成独立数据集目录：
+
+```text
+pedicle_crop_dataset/
+├── images/
+│   ├── sourceA_T1.jpg
+│   ├── sourceA_T2.jpg
+│   └── ...
+├── labels/
+│   ├── sourceA_T1.txt
+│   ├── sourceA_T2.txt
+│   └── ...
+└── meta/
+    ├── sourceA_T1.json
+    ├── sourceA_T2.json
+    └── ...
+```
+
+也可以按原始 split 保留结构：
+
+```text
+pedicle_crop_dataset/
+├── train/
+│   ├── images/
+│   ├── labels/
+│   └── meta/
+├── valid/
+│   ├── images/
+│   ├── labels/
+│   └── meta/
+└── test/
+    ├── images/
+    ├── labels/
+    └── meta/
+```
+
+### 3. crop 图片命名
+
+推荐文件名包含来源和椎骨编号：
+
+```text
+{source_stem}_{vertebra_name}.jpg
+```
+
+如果同一来源可能重复生成，增加序号或 hash：
+
+```text
+{source_stem}_{vertebra_name}_{index:02d}.jpg
+```
+
+### 4. meta 文件
+
+每张 crop 图保留回溯信息，方便将预测结果映射回原图，也方便质控：
+
+```json
+{
+  "source_image": "train/images/sourceA.jpg",
+  "source_label": "train/labels/sourceA.txt",
+  "vertebra": "T8",
+  "internal_class_id": 8,
+  "export_class_id": 0,
+  "source_image_size": [2048, 2048],
+  "crop_image_size": [192, 160],
+  "source_aabb_xyxy": [820.0, 710.0, 980.0, 850.0],
+  "crop_aabb_xyxy": [796.0, 689.0, 1004.0, 871.0],
+  "source_obb_points": [[...], [...], [...], [...]],
+  "padding_ratio": 0.15
+}
+```
+
+其中：
+
+- `source_aabb_xyxy` 是椎骨原始 AABB。
+- `crop_aabb_xyxy` 是加 padding 后真实裁剪区域。
+- `source_obb_points` 仍保留，但仅用于上层几何推导和回溯，不作为椎弓根模型输入的必要标签。
+
+## 单椎骨标注数据模型
+
+crop 图上的标注不再需要保存整图 OBB。每张 crop 图只需要一组左右椎弓根标注：
 
 ```python
 @dataclass
 class PediclePoint:
     center: Optional[Point] = None
     visibility: int = 0
-    confidence: Optional[float] = None
 
 @dataclass
-class PedicleAnnotation:
+class CropPedicleAnnotation:
+    image_path: str
+    image_width: int
+    image_height: int
     image_left: PediclePoint = field(default_factory=PediclePoint)
     image_right: PediclePoint = field(default_factory=PediclePoint)
+    modified: bool = False
 ```
 
-并在 `OBBAnnotation` 上增加：
-
-```python
-pedicles: PedicleAnnotation = field(default_factory=PedicleAnnotation)
-```
-
-可见性建议沿用 YOLO pose 的 0/1/2 基础语义，但命名要明确为椎弓根可见性：
+可见性建议：
 
 | 值 | 含义 | 标注要求 |
 | --- | --- | --- |
 | `2` | 清晰可见 | 标中心点 |
 | `1` | 模糊/重叠但可定位 | 标中心点，训练时可作为低置信样本 |
-| `0` | 不可见/不可定位 | 不要求标中心点 |
+| `0` | 不可见/不可定位 | 不强迫标中心点 |
 
-如果需要更细的质控，可在 UI 中展示 4 档，但导出训练时折叠为 0/1/2：
+## 单椎骨标注 UI
 
-- 清晰可见 -> 2
-- 模糊但可定位 -> 1
-- 与椎体边缘/结构重叠但可定位 -> 1
-- 不可见/不可定位 -> 0
+建议新增“椎弓根 crop 标注模式”，打开 `pedicle_crop_dataset` 后进入单椎骨图片列表，而不是整图多椎骨画布。
 
-## 缓存格式
+右侧面板只保留与当前 crop 相关的控件：
 
-当前进度缓存通过 `YOLOConverter.build_annotation_states()` 保存每节椎骨的 `points`、`keypoint_visibility`、`shape_type` 等状态。建议扩展 `annotation_states`：
+- 当前来源：原图名、椎骨编号、split。
+- 标注侧别：图像左椎弓根 / 图像右椎弓根。
+- 可见性：可见(2) / 模糊可定位(1) / 不可见(0)。
+- 清除当前侧点位。
+- 保存当前、上一张、下一张。
 
-```json
-{
-  "class_id": 8,
-  "class_name": "T8",
-  "points": [[...], [...], [...], [...]],
-  "keypoint_visibility": 2,
-  "shape_type": "obb",
-  "pedicles": {
-    "image_left": {
-      "center": [123.4, 456.7],
-      "visibility": 2
-    },
-    "image_right": {
-      "center": null,
-      "visibility": 0
-    }
-  }
-}
-```
+画布行为：
 
-加载逻辑需要在 `_restore_annotation_state()` 和 `_create_annotation_from_state()` 中恢复 `pedicles`。旧缓存没有该字段时按默认空椎弓根标注处理，保持兼容。
-
-## UI 交互设计
-
-### 标注模式
-
-在右侧面板新增“椎弓根标注”区域：
-
-- 模式切换：关闭 / 标图像左椎弓根 / 标图像右椎弓根。
-- 可见性选择：清晰可见(2) / 模糊可定位(1) / 不可见(0)。
-- 清除按钮：清除当前选中椎骨的左/右椎弓根点。
+1. 点击 crop 图，写入当前侧椎弓根中心点。
+2. 拖拽已有点位可微调。
+3. `v=2` 使用实心点，`v=1` 使用空心或虚线点，`v=0` 不强制显示点。
+4. 点位坐标保存为 crop 图坐标，导出时归一化到 crop 图尺寸。
 
 推荐快捷键：
 
-- `P`：进入/退出椎弓根标注模式。
 - `[`：切到图像左椎弓根。
 - `]`：切到图像右椎弓根。
-- `1` / `2` / `0`：设置当前侧椎弓根可见性。
+- `0` / `1` / `2`：设置当前侧可见性。
+- `Delete`：清除当前侧点位。
 
-### 画布行为
+## 标签导出格式
 
-1. 选中某一节椎骨后，进入椎弓根标注模式。
-2. 点击椎骨框内部，给当前侧写入中心点坐标。
-3. 点位以固定屏幕大小圆点显示，不随缩放变大。
-4. 图像左/右使用不同颜色，例如：
-   - image_left: cyan
-   - image_right: magenta
-5. 可见性为 `1` 时使用空心或虚线圆；`0` 时不显示点或显示小型不可见标记。
-6. 拖拽已有点位可微调坐标。
-
-为了减少误标，建议只允许在选中椎骨的 OBB 多边形内落点；若点击框外，弹出轻提示或忽略。
-
-## 导出格式
-
-不建议把椎弓根塞进现有 `YOLOv8-pose (bbox + 4 关键点)`，因为该格式已经服务于椎骨四角点训练。
-
-也不建议只导出 `cx cy w h` 水平外接框。`cx cy w h` 是 AABB，不包含椎骨旋转角度；如果椎弓根模型训练时看不到椎体 OBB 的 4 个角点，会丢失椎骨倾斜和旋转框几何，影响后续按椎体参考系学习左右椎弓根位置。
-
-建议新增专用导出项：
+每张 crop 图对应一个标签文件。因为每张图只有一个椎骨实例，推荐格式为：
 
 ```text
-OBB + pedicle keypoints
-```
-
-每行对应一节椎骨：
-
-```text
-class_id x1 y1 x2 y2 x3 y3 x4 y4 left_x left_y left_v right_x right_y right_v
+class_id left_x left_y left_v right_x right_y right_v
 ```
 
 字段说明：
 
-- `class_id`：继续沿用导出折叠规则，C7-L5 为 `0`，S1 为 `1`。如果 S1 不参与椎弓根训练，可在导出时跳过 S1。
-- `x1 y1 x2 y2 x3 y3 x4 y4`：椎骨 OBB 四角点，顺时针排列，归一化到 `[0, 1]`，语义与现有 `YOLOv8-OBB (四角点)` 一致。
-- `left_x left_y left_v`：图像左侧椎弓根中心点与可见性。
-- `right_x right_y right_v`：图像右侧椎弓根中心点与可见性。
-- 当 `v=0` 且没有中心点时，坐标可写 `0 0 0`，训练前也可以过滤不可见点。
+- `class_id`：建议保留，默认 `0 = vertebra_crop`。如果后续希望区分 C/T/L/S 或 S1，可扩展。
+- `left_x left_y left_v`：crop 图像左侧椎弓根中心点和可见性。
+- `right_x right_y right_v`：crop 图像右侧椎弓根中心点和可见性。
+- 坐标归一化到 crop 图宽高。
+- 当 `v=0` 且没有中心点时，坐标可写 `0 0 0`。
 
-该格式每行固定 `1 + 8 + 6 = 15` 个字段。它是本项目的训练中间格式，不是原生 YOLOv8-pose 格式；训练脚本可以在读取时用 OBB 四角点生成单节椎骨 ROI、椎体局部坐标系或外接 AABB，再监督左右椎弓根点位。
+示例：
 
-如果训练时不需要 S1，建议导出函数提供选项：`include_s1=False`。
+```text
+0 0.428125 0.391667 2 0.584375 0.400000 1
+```
+
+如果训练脚本不需要类别，也可在训练前忽略第一列。
+
+## 推理时坐标回原图
+
+椎弓根模型输出 crop 坐标后，上层软件使用 meta 里的 `crop_aabb_xyxy` 映射回原图：
+
+```text
+source_x = crop_left + pred_x * crop_width
+source_y = crop_top  + pred_y * crop_height
+```
+
+不做旋转矫正时，映射只需要平移和缩放，工程实现简单且稳定。
 
 ## 与上层算法的关系
 
-椎弓根模型只输出图像坐标系下的左右点位和可见性：
+椎弓根模型只输出：
 
 ```text
-image_left_pedicle
-image_right_pedicle
-image_left_visibility
-image_right_visibility
+crop_image_left_pedicle
+crop_image_right_pedicle
+crop_image_left_visibility
+crop_image_right_visibility
 ```
 
 上层软件负责：
 
 ```text
+整图椎骨识别与编号
+AABB crop 生成
+crop 坐标映射回原图
 AP/PA/翻转判断
 image_left/image_right -> patient_left/patient_right
 右胸弯/左腰弯/顶椎/端椎判断
@@ -165,46 +262,53 @@ image_left/image_right -> patient_left/patient_right
 Nash-Moe 0-4 级生成
 ```
 
-因此该扩展不需要标注凸侧标签，也不需要人工标 Nash-Moe 等级。可在后续抽样验证集中由医师复核算法分级阈值。
-
 ## 推荐实现拆分
 
-### 阶段 1：标注与缓存
+### 阶段 1：crop 数据集生成
 
-- 新增 `PediclePoint` / `PedicleAnnotation` 数据结构。
-- 扩展 cache 保存和恢复逻辑。
-- 在画布上渲染左右椎弓根点。
-- 支持点击新增、拖拽微调、清除点位。
-- 右侧面板支持左右侧别和可见性编辑。
+- 新增基于现有 `OBBAnnotation` 的 AABB 计算工具。
+- 新增 `export_pedicle_crops()`，把原图裁剪为单椎骨图片。
+- 输出 `images/`、空 `labels/`、`meta/`。
+- 支持 padding ratio 配置。
+- 保证原始 X 光片和原始 label 只读，不被覆盖。
 
-### 阶段 2：导出
+### 阶段 2：单椎骨标注模式
 
-- 新增 `save_pedicle_obb_keypoints()`。
-- 导出格式新增到下拉框和 `_on_format_changed()`。
-- 单张保存和全部导出都支持 OBB + pedicle keypoints。
-- README 补充新格式说明。
+- 新增 crop 数据集扫描逻辑。
+- 新增 `CropPedicleAnnotation` 数据结构。
+- 新增单椎骨画布点位标注 UI。
+- 新增 crop 标注缓存，避免切图丢失。
 
-### 阶段 3：AI 辅助
+### 阶段 3：导出与训练准备
 
-- 现有椎骨 AI 预标注继续只生成 OBB / 四角点。
-- 当椎弓根模型训练完成后，新增“椎弓根 AI 预标注”入口。
-- 椎弓根推理应基于当前椎骨框逐节 crop 或传入整片图像+椎骨框，返回每节的左右点和可见性。
+- 新增 `save_crop_pedicle_label()`。
+- 单张保存和批量导出写入 `labels/{crop_stem}.txt`。
+- README 补充 crop 数据集生成、标注和导出说明。
+- 提供训练数据检查：每张 crop 至少有一个可定位椎弓根，字段数固定为 7。
+
+### 阶段 4：AI 辅助
+
+- 保留现有整图 AI 预标注作为 crop 数据来源。
+- 椎弓根模型训练完成后，新增“椎弓根 crop AI 预标注”入口。
+- 推理时逐节裁剪，调用椎弓根模型，再通过 meta / AABB 映射回原图。
 
 ## 验收标准
 
-1. 打开旧数据集和旧缓存不报错，旧标注显示和导出结果不变。
-2. 每节椎骨可独立标注图像左/右椎弓根中心点。
-3. 左右椎弓根可见性可独立设置并可持久化。
-4. 切图、关闭重开后，椎弓根点和可见性完整恢复。
-5. 新增 OBB + pedicle keypoints 导出格式，输出字段数量固定为 15。
-6. `v=0` 的点允许无中心点，不阻塞保存。
-7. 导出的坐标均 clamp 到 `[0, 1]`。
-8. 现有 OBB、xywhr、4 角点 pose 导出不受影响。
+1. 生成 crop 数据集时不修改原图和原始 label。
+2. 每节椎骨输出一张 crop 图，正常全脊柱每张原图约生成 18-19 张 crop。
+3. crop 文件、label 文件、meta 文件能通过文件名一一对应。
+4. crop 使用 AABB + padding，超出原图边界时正确 clamp。
+5. 单椎骨 crop 图上可独立标注图像左/右椎弓根中心点。
+6. 左右可见性可独立设置并持久化。
+7. `v=0` 的椎弓根允许无中心点，不阻塞保存。
+8. 导出标签每行固定 7 个字段。
+9. 使用 meta 能把 crop 预测坐标准确映射回原图。
+10. 现有整图 OBB、xywhr、4 角点 pose 导出不受影响。
 
 ## 风险与注意事项
 
-- 不要复用 `keypoint_visibility` 表示椎弓根可见性；该字段当前语义是椎骨四角点统一可见性。
+- AABB crop 需要合理 padding，贴边裁剪可能丢失椎弓根上下文。
+- 训练增强若做水平翻转，必须同步交换 image_left 和 image_right 标签。
 - 不要在椎弓根模型里预测凸侧/凹侧，否则会把局部结构识别和上层临床推理混在一起。
-- 训练增强若做左右翻转，必须同步交换 image_left/image_right 标签。
-- 椎骨 ROI 旋转矫正后训练时，需要保留坐标映射关系，确保导出坐标仍能回到原图。
 - 对不可见椎弓根不要强迫标注员猜点，否则会引入系统性噪声。
+- crop 数据集应记录来源 meta，否则后续难以做错误回溯和原图坐标映射。

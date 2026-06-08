@@ -32,12 +32,12 @@ from .models import (
 
 #: ONNX 模型下载地址（阿里云 OSS），部署后替换为实际 URL
 MODEL_URL: str = (
-    "https://yzxingtu.oss-cn-hangzhou.aliyuncs.com"
-    "/spine-discern/model/spine-pose-v0.2.0-1024.onnx"
+    "http://oss.yzxingtu.com"
+    "/spine-discern/model/yolov8n-0605.onnx"
 )
 
 #: 模型文件名（与 URL 末尾一致）
-MODEL_FILENAME: str = "spine-pose-v0.2.0-1024.onnx"
+MODEL_FILENAME: str = "yolov8n-0605.onnx"
 
 #: 推理输入尺寸（与模型导出时一致）
 MODEL_INPUT_SIZE: int = 1024
