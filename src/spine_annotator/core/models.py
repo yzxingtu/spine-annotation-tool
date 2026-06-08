@@ -24,6 +24,19 @@ VERTEBRA_CLASSES: dict[int, str] = {
 # 内部 S1 编号（用于 export 映射 / 加载时的特殊判断）
 INTERNAL_CLASS_ID_S1: int = 18
 
+# Reverse mapping: vertebra name → class_id (for sorting)
+VERTEBRA_NAME_TO_ID: dict[str, int] = {v: k for k, v in VERTEBRA_CLASSES.items()}
+
+
+def vertebra_sort_key(name: str) -> int:
+    """Return sort key for vertebra name in anatomical order.
+
+    C7=0, T1=1, ..., T12=12, L1=13, ..., L5=17, S1=18.
+    Unknown names return 999 (sort to end).
+    """
+    return VERTEBRA_NAME_TO_ID.get(name, 999)
+
+
 # YOLO 训练标签的 class_id（与 scoliosis-pose/scoliosis.yaml 的 names 对齐）
 #   0 = vertebra  (C7 ~ L5 共 18 节统一为一类)
 #   1 = S1        (骶骨第一节，作为骨盆 / 下端解剖锚点)
@@ -243,4 +256,39 @@ class ImageAnnotation:
     image_width: int
     image_height: int
     annotations: List[OBBAnnotation] = field(default_factory=list)
+    modified: bool = False
+
+
+# ---------------------------------------------------------------------------
+# 椎弓根 Crop 标注数据结构
+# ---------------------------------------------------------------------------
+
+# 椎弓根可见性等级 (crop 图像左右椎弓根独立设置)
+#   0 = 不可见 (无法定位，不强制标中心点)
+#   1 = 遮挡 (被其他结构挡住但可推断位置)
+#   2 = 模糊可见 (不清晰但能估计中心)
+#   3 = 清晰可见 (完全可定位)
+PEDICLE_VISIBILITY: dict[int, str] = {
+    0: "不可见",
+    1: "遮挡",
+    2: "模糊可见",
+    3: "清晰可见",
+}
+
+
+@dataclass
+class PediclePoint:
+    """单侧椎弓根中心点及可见性。"""
+    center: Optional[Point] = None
+    visibility: int = 0  # 0=不可见 1=遮挡 2=模糊可见 3=清晰可见
+
+
+@dataclass
+class CropPedicleAnnotation:
+    """单椎骨 crop 图上的左右椎弓根标注。"""
+    image_path: str
+    image_width: int
+    image_height: int
+    image_left: PediclePoint = field(default_factory=PediclePoint)
+    image_right: PediclePoint = field(default_factory=PediclePoint)
     modified: bool = False

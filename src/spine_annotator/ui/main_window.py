@@ -9,7 +9,7 @@ from typing import List, Optional
 from PyQt5.QtCore import Qt, QSettings, QTimer
 from PyQt5.QtGui import QBrush, QColor, QKeySequence, QPalette
 from PyQt5.QtWidgets import (
-    QAction, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QAction, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
     QRadioButton, QScrollArea, QShortcut, QSpinBox, QTextBrowser, QVBoxLayout,
@@ -442,6 +442,25 @@ class MainWindow(QMainWindow):
         act_clear_all.setStatusTip("删除进度缓存与当前 split 的训练标注文件（不可恢复）")
         act_clear_all.triggered.connect(self._clear_all_data)
         tools_menu.addAction(act_clear_all)
+
+        tools_menu.addSeparator()
+
+        act_gen_crop = QAction("生成椎弓根 crop 数据集…", self)
+        act_gen_crop.setStatusTip("基于当前整图椎骨标注，按 AABB 裁剪生成单椎骨 crop 数据集")
+        act_gen_crop.setEnabled(False)
+        act_gen_crop.triggered.connect(self._generate_crop_dataset)
+        tools_menu.addAction(act_gen_crop)
+
+        act_open_crop = QAction("打开 crop 数据集…", self)
+        act_open_crop.setStatusTip("打开已生成的 crop 数据集，进入椎弓根标注模式")
+        act_open_crop.setEnabled(False)
+        act_open_crop.triggered.connect(self._open_crop_dataset)
+        tools_menu.addAction(act_open_crop)
+
+        act_pedicle_full = QAction("整图椎弓根标注…", self)
+        act_pedicle_full.setStatusTip("在完整X光上标注椎弓根点位，无需预先生成 crop")
+        act_pedicle_full.triggered.connect(self._open_pedicle_full_window)
+        tools_menu.addAction(act_pedicle_full)
 
         help_menu = menubar.addMenu("帮助(&H)")
 
@@ -1910,6 +1929,124 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().showMessage(summary, 5000)
+
+    def _generate_crop_dataset(self):
+        """基于当前整图椎骨标注，按 AABB 裁剪生成单椎骨 crop 数据集。"""
+        from ..core.crop_generator import generate_crops
+
+        if not self._image_infos:
+            QMessageBox.information(self, "提示", "请先加载图片数据集。")
+            return
+
+        # 检查是否有已标注的图片
+        has_annotated = any(
+            self._cache.get(info["rel_path"], {}).get("saved")
+            or self._cache.get(info["rel_path"], {}).get("annotation_states")
+            or info.get("has_labels")
+            for info in self._image_infos
+        )
+        if not has_annotated:
+            QMessageBox.warning(self, "提示", "当前数据集没有任何椎骨标注，无法生成 crop。\n请先完成整图椎骨标注或 AI 预标注。")
+            return
+
+        # 弹出对话框：选择输出目录和 padding ratio
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "选择 crop 数据集输出目录",
+            str(Path(self._dataset_root or ".").parent),
+        )
+        if not output_dir:
+            return
+
+        padding_ratio, ok = QInputDialog.getDouble(
+            self, "Padding Ratio",
+            "AABB 扩大比例 (0 - 0.30)：",
+            value=0.15, min=0.0, max=0.30, decimals=2,
+        )
+        if not ok:
+            return
+
+        # 执行生成
+        self.statusBar().showMessage("正在生成 crop 数据集…")
+        QApplication.processEvents()
+
+        try:
+            result = generate_crops(
+                image_infos=self._image_infos,
+                cache=self._cache,
+                converter=self._converter,
+                output_dir=output_dir,
+                padding_ratio=padding_ratio,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "生成失败",
+                f"crop 数据集生成过程中发生异常：\n\n{exc}",
+            )
+            return
+
+        total = result["total_crops"]
+        stats = result.get("stats", {})
+        errors = result.get("errors", [])
+
+        # 构建详细报告
+        detail_lines = [
+            f"已生成 {total} 张单椎骨 crop 图片",
+            "",
+            "—— 诊断信息 ——",
+            f"扫描图片数: {stats.get('total_images', '?')}",
+            f"无标注跳过: {stats.get('images_no_annotations', 0)}",
+            f"图片读取失败: {stats.get('images_read_error', 0)}",
+            f"标注总数: {stats.get('total_annotations_found', 0)}",
+            f"跳过(line类型): {stats.get('skipped_line_type', 0)}",
+            f"跳过(无效名称): {stats.get('skipped_invalid_name', 0)}",
+            f"跳过(退化尺寸): {stats.get('skipped_degenerate', 0)}",
+        ]
+        if errors:
+            detail_lines.append("")
+            detail_lines.append("—— 错误详情 ——")
+            detail_lines.extend(errors[:10])
+
+        detail_lines.append("")
+        detail_lines.append(f"输出目录：\n{output_dir}")
+
+        QMessageBox.information(
+            self, "生成完成", "\n".join(detail_lines),
+        )
+        self.statusBar().showMessage(f"crop 数据集生成完成：{total} 张", 5000)
+
+    def _open_crop_dataset(self):
+        """打开已生成的 crop 数据集，进入椎弓根标注模式。"""
+        from .crop_window import CropWindow
+
+        start_dir = str(Path(self._dataset_root or ".").parent)
+        dataset_dir = QFileDialog.getExistingDirectory(
+            self, "选择 crop 数据集目录", start_dir,
+        )
+        if not dataset_dir:
+            return
+
+        self._crop_window = CropWindow(dataset_dir, parent=self)
+        self._crop_window.show()
+
+    def _open_pedicle_full_window(self):
+        """在完整X光上标注椎弓根点位。"""
+        from .pedicle_full_window import PedicleFullWindow
+
+        if not self._image_infos:
+            QMessageBox.information(self, "提示", "请先加载图片数据集。")
+            return
+
+        # Get cache path
+        cache_path = self._progress_cache_path or ""
+
+        self._pedicle_full_window = PedicleFullWindow(
+            image_infos=self._image_infos,
+            converter=self._converter,
+            cache=self._cache,
+            cache_path=cache_path,
+            parent=self,
+        )
+        self._pedicle_full_window.show()
 
     def _clear_current_image(self):
         """清空当前图片的标注、缓存条目与已导出 .txt（需二次确认）。"""
