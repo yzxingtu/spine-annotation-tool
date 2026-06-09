@@ -9,7 +9,8 @@ from PyQt5.QtGui import QBrush, QColor, QIcon, QKeySequence, QPainter, QPalette,
 from PyQt5.QtWidgets import (
     QAction, QButtonGroup, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QRadioButton, QShortcut, QSplitter, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QRadioButton, QShortcut, QSplitter, QVBoxLayout,
+    QWidget,
 )
 
 from ..core.converter import YOLOConverter
@@ -133,6 +134,13 @@ class PedicleFullWindow(QMainWindow):
         self._btn_flag.setToolTip("标记当前图片为标注难点，稍后继续")
         self._btn_flag.toggled.connect(self._on_flag_toggled)
         left_layout.addWidget(self._btn_flag)
+
+        # Progress bar
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFormat("已标注: %v / %m")
+        self._progress_bar.setMaximum(max(len(self._image_infos), 1))
+        self._progress_bar.setValue(0)
+        left_layout.addWidget(self._progress_bar)
 
         self._image_list = QListWidget()
         self._image_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -914,3 +922,11 @@ class PedicleFullWindow(QMainWindow):
             if i >= len(self._image_infos):
                 break
             self._apply_image_item_style(i)
+        self._update_progress()
+
+    def _update_progress(self):
+        """Update progress bar to reflect saved image count."""
+        total = len(self._image_infos)
+        saved = len(self._saved_images)
+        self._progress_bar.setMaximum(max(total, 1))
+        self._progress_bar.setValue(saved)
