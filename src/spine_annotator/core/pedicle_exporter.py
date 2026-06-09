@@ -12,6 +12,102 @@ from .crop_generator import _expand_and_clamp, _obb_to_aabb
 from .models import OBBAnnotation, vertebra_sort_key
 
 
+def save_pedicle_labels_for_image(
+    info: dict,
+    pedicle_data: dict,
+    cache: dict,
+    converter: YOLOConverter,
+    output_dir: str,
+    padding_ratio: float = 0.15,
+) -> int:
+    """Write label files for one image's pedicle annotations.
+
+    Same coordinate system and format as export_pedicle_crops, but only
+    writes labels (no images / meta).
+
+    Returns:
+        Number of label files written.
+    """
+    img_path = info["image_path"]
+    rel_path = info["rel_path"]
+    label_path = info.get("label_path")
+    img_w = info["width"]
+    img_h = info["height"]
+    split = info.get("split", "")
+    source_stem = Path(img_path).stem
+
+    if not pedicle_data:
+        return 0
+
+    # Load OBB annotations
+    try:
+        ann = converter.load_single(
+            img_path, label_path, img_w, img_h,
+            cache_entry=cache.get(rel_path, {}),
+        )
+    except Exception:
+        return 0
+
+    # Build vert_name -> OBB annotation mapping
+    vert_obb_map: Dict[str, OBBAnnotation] = {}
+    for vert_ann in ann.annotations:
+        if vert_ann.shape_type == "obb" and vert_ann.class_name:
+            vert_obb_map[vert_ann.class_name] = vert_ann
+
+    # Determine label output directory
+    out_root = Path(output_dir)
+    if split:
+        lbl_dir = out_root / split / "labels"
+    else:
+        lbl_dir = out_root / "labels"
+    lbl_dir.mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    sorted_verts = sorted(pedicle_data.keys(), key=lambda v: vertebra_sort_key(v))
+
+    for vert_name in sorted_verts:
+        pdata = pedicle_data[vert_name]
+        if vert_name not in vert_obb_map:
+            continue
+
+        # Skip vertebrae with no actual pedicle points on either side
+        left_data = pdata.get("left", {})
+        right_data = pdata.get("right", {})
+        has_left = bool(
+            left_data and left_data.get("center")
+            and left_data.get("visibility", 0) > 0
+        )
+        has_right = bool(
+            right_data and right_data.get("center")
+            and right_data.get("visibility", 0) > 0
+        )
+        if not has_left and not has_right:
+            continue
+
+        vert_ann = vert_obb_map[vert_name]
+
+        # Compute AABB + expand with padding
+        aabb_x1, aabb_y1, aabb_x2, aabb_y2 = _obb_to_aabb(vert_ann)
+        crop_x1, crop_y1, crop_x2, crop_y2 = _expand_and_clamp(
+            aabb_x1, aabb_y1, aabb_x2, aabb_y2,
+            padding_ratio, img_w, img_h,
+        )
+        if crop_x2 - crop_x1 < 4 or crop_y2 - crop_y1 < 4:
+            continue
+
+        # Convert pedicle points to crop coordinates
+        crop_left = _to_crop_coords(left_data, crop_x1, crop_y1)
+        crop_right = _to_crop_coords(right_data, crop_x1, crop_y1)
+
+        # Write label file
+        crop_stem = f"{source_stem}-{vert_name}"
+        crop_lbl_path = lbl_dir / f"{crop_stem}.txt"
+        _write_label_file(crop_lbl_path, crop_left, crop_right)
+        written += 1
+
+    return written
+
+
 def export_pedicle_crops(
     image_infos: List[dict],
     pedicle_data: Dict[str, dict],
@@ -169,8 +265,10 @@ def export_pedicle_crops(
             with open(crop_meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2, ensure_ascii=False)
 
-            # Build label file (YOLO format: class cx cy w h normalized)
-            _write_label_file(crop_lbl_path, crop_left, crop_right, crop_w, crop_h)
+            # Build label file
+            # Line 1: 0 left_x left_y left_v
+            # Line 2: 1 right_x right_y right_v
+            _write_label_file(crop_lbl_path, crop_left, crop_right)
 
             total_crops += 1
             per_vert[vert_name] = per_vert.get(vert_name, 0) + 1
@@ -193,22 +291,25 @@ def _to_crop_coords(data: dict, crop_x1: int, crop_y1: int) -> dict:
     }
 
 
-def _write_label_file(path: Path, left: dict, right: dict,
-                      crop_w: int, crop_h: int):
-    """Write YOLO label file with pedicle point annotations."""
+def _write_label_file(path: Path, left: dict, right: dict):
+    """Write label file with two lines per vertebra.
+
+    Line 1 (left):  0  left_x  left_y  left_v
+    Line 2 (right): 1  right_x  right_y  right_v
+
+    Coordinates are in crop-image pixel space.
+    Missing sides are omitted (no line written).
+    """
     lines = []
-    class_id = 0  # All pedicles as single class
 
-    for side_data in (left, right):
-        if not side_data or not side_data.get("center"):
-            continue
-        if side_data.get("visibility", 0) == 0:
-            continue
-
-        cx = side_data["center"]["x"] / crop_w
-        cy = side_data["center"]["y"] / crop_h
-        # Point annotation: w=0, h=0 in YOLO format
-        lines.append(f"{class_id} {cx:.6f} {cy:.6f} 0 0")
+    if left and left.get("center") and left.get("visibility", 0) > 0:
+        lines.append(
+            f"0\t{left['center']['x']:.3f}\t{left['center']['y']:.3f}\t{left['visibility']}"
+        )
+    if right and right.get("center") and right.get("visibility", 0) > 0:
+        lines.append(
+            f"1\t{right['center']['x']:.3f}\t{right['center']['y']:.3f}\t{right['visibility']}"
+        )
 
     with open(path, "w") as f:
         f.write("\n".join(lines))

@@ -122,8 +122,8 @@ class CropWindow(QMainWindow):
         # Visibility
         right_layout.addWidget(self._section_label("可见性"))
         self._vis_group = QButtonGroup(self)
-        vis_names = {0: "不可见 (0)", 1: "遮挡 (1)", 2: "模糊可见 (2)", 3: "清晰可见 (3)"}
-        for v in (3, 2, 1, 0):
+        vis_names = {1: "遮挡 (1)", 2: "模糊可见 (2)", 3: "清晰可见 (3)"}
+        for v in (3, 2, 1):
             rb = QRadioButton(vis_names[v])
             rb.setProperty("vis_value", v)
             self._vis_group.addButton(rb, v)
@@ -206,8 +206,8 @@ class CropWindow(QMainWindow):
         QShortcut(QKeySequence("R"), self, lambda: self._set_active_side("right"))
         QShortcut(QKeySequence("Left"), self, lambda: self._set_active_side("left"))
         QShortcut(QKeySequence("Right"), self, lambda: self._set_active_side("right"))
-        # Visibility
-        for v in range(4):
+        # Visibility (1=遮挡, 2=模糊可见, 3=清晰可见)
+        for v in range(1, 4):
             QShortcut(QKeySequence(str(v)), self, lambda val=v: self._set_visibility(val))
         # Clear
         QShortcut(QKeySequence("Delete"), self, self._on_clear_point)

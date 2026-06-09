@@ -5,21 +5,54 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QSettings
-from PyQt5.QtGui import QBrush, QColor, QKeySequence, QPalette
+from PyQt5.QtGui import QBrush, QColor, QIcon, QKeySequence, QPainter, QPalette, QPixmap
 from PyQt5.QtWidgets import (
     QAction, QButtonGroup, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-    QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPushButton, QRadioButton, QShortcut, QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..core.converter import YOLOConverter
+from ..core.image_enhancer import EnhanceParams
 from ..core.models import PEDICLE_VISIBILITY, VERTEBRA_CLASSES, VertebraCategory, get_vertebra_category, vertebra_sort_key
+from .enhancement_panel import EnhancementDialog, EnhancementToolbar
 from .pedicle_full_canvas import PedicleFullCanvas
 
 _MUTED_STYLE = "color: #888; font-size: 11px;"
 
 # Cache key for pedicle annotations
 PEDICLE_CACHE_KEY = "pedicle_annotations"
+
+# ── Flag icon (lazy-cached) ────────────────────────────────────────────
+_FLAG_ICON: Optional[QIcon] = None
+
+
+def _get_flag_icon() -> QIcon:
+    """Return a blue-background flag QIcon, cached on first call."""
+    global _FLAG_ICON
+    if _FLAG_ICON is not None:
+        return _FLAG_ICON
+
+    S = 15  # base icon size in pixels
+    pm = QPixmap(S, S)
+    pm.fill(Qt.transparent)
+
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    # Blue rounded background
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor("#228be6"))
+    p.drawRoundedRect(0, 0, S, S, 2, 2)
+    # Red flag pole
+    p.setBrush(QColor("#e03131"))
+    p.drawRect(3, 2, 2, 11)
+    # White flag body
+    p.setBrush(QColor("#ffffff"))
+    p.drawRect(5, 2, 7, 5)
+    p.end()
+
+    _FLAG_ICON = QIcon(pm)
+    return _FLAG_ICON
 
 
 class PedicleFullWindow(QMainWindow):
@@ -68,6 +101,9 @@ class PedicleFullWindow(QMainWindow):
         self._spin_point_size.setValue(radius)
         self._spin_point_size.blockSignals(False)
 
+        # Update export directory label
+        self._update_export_dir_label()
+
         # Load first image
         if self._image_infos:
             self._go_to_image(0)
@@ -91,7 +127,16 @@ class PedicleFullWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(QLabel("图片列表"))
 
+        # Flag button (image-level, like main window)
+        self._btn_flag = QPushButton("⚑ 标记难点 (M)")
+        self._btn_flag.setCheckable(True)
+        self._btn_flag.setToolTip("标记当前图片为标注难点，稍后继续")
+        self._btn_flag.toggled.connect(self._on_flag_toggled)
+        left_layout.addWidget(self._btn_flag)
+
         self._image_list = QListWidget()
+        self._image_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._image_list.customContextMenuRequested.connect(self._on_image_list_context_menu)
         self._image_list.currentRowChanged.connect(self._on_image_selected)
         left_layout.addWidget(self._image_list)
 
@@ -105,14 +150,27 @@ class PedicleFullWindow(QMainWindow):
 
         splitter.addWidget(left_widget)
 
-        # --- Center: Canvas ---
+        # --- Center: Canvas with enhancement toolbar above ---
+        center_widget = QWidget()
+        center_layout = QVBoxLayout(center_widget)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+
+        self._enhance_toolbar = EnhancementToolbar()
+        self._enhance_toolbar.open_dialog_requested.connect(self._open_enhance_dialog)
+        self._enhance_toolbar.invert_toggled.connect(self._on_enhance_invert_toggled)
+        self._enhance_toolbar.reset_requested.connect(self._reset_enhance_params)
+        self._enhance_dialog: Optional[EnhancementDialog] = None
+        center_layout.addWidget(self._enhance_toolbar)
+
         self._canvas = PedicleFullCanvas()
         self._canvas.vertebra_clicked.connect(self._on_vert_clicked)
         self._canvas.point_changed.connect(self._on_point_changed)
         self._canvas.right_clicked.connect(self._toggle_flag)
         self._canvas.side_deselected.connect(self._on_side_deselected)
         self._canvas.side_selected.connect(self._on_side_selected)
-        splitter.addWidget(self._canvas)
+        center_layout.addWidget(self._canvas)
+        splitter.addWidget(center_widget)
 
         # --- Right: Control panel ---
         right_widget = QWidget()
@@ -153,8 +211,8 @@ class PedicleFullWindow(QMainWindow):
         # Visibility
         right_layout.addWidget(QLabel("可见性"))
         self._vis_group = QButtonGroup(self)
-        vis_names = {0: "不可见 (0)", 1: "遮挡 (1)", 2: "模糊可见 (2)", 3: "清晰可见 (3)"}
-        for v in (3, 2, 1, 0):
+        vis_names = {1: "遮挡 (1)", 2: "模糊可见 (2)", 3: "清晰可见 (3)"}
+        for v in (3, 2, 1):
             rb = QRadioButton(vis_names[v])
             self._vis_group.addButton(rb, v)
             right_layout.addWidget(rb)
@@ -176,12 +234,6 @@ class PedicleFullWindow(QMainWindow):
         size_row.addWidget(self._spin_point_size)
         right_layout.addLayout(size_row)
 
-        # Flag button
-        self._btn_flag = QPushButton("标记难点 (M)")
-        self._btn_flag.setCheckable(True)
-        self._btn_flag.clicked.connect(self._toggle_flag)
-        right_layout.addWidget(self._btn_flag)
-
         # Delete point button
         self._btn_delete = QPushButton("移除当前侧点位 (Del)")
         self._btn_delete.clicked.connect(self._on_clear_point)
@@ -191,6 +243,21 @@ class PedicleFullWindow(QMainWindow):
         self._btn_save = QPushButton("保存当前 (Ctrl+S)")
         self._btn_save.clicked.connect(self._save)
         right_layout.addWidget(self._btn_save)
+
+        # Export button
+        self._btn_export = QPushButton("导出 Crop 数据集…")
+        self._btn_export.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; "
+            "font-weight: bold; padding: 8px; }"
+        )
+        self._btn_export.clicked.connect(self._export_crops)
+        right_layout.addWidget(self._btn_export)
+
+        # Export directory label
+        self._lbl_export_dir = QLabel("")
+        self._lbl_export_dir.setStyleSheet("color: #888; font-size: 10px;")
+        self._lbl_export_dir.setWordWrap(True)
+        right_layout.addWidget(self._lbl_export_dir)
 
         right_layout.addStretch()
 
@@ -218,15 +285,6 @@ class PedicleFullWindow(QMainWindow):
 
         right_layout.addStretch()
 
-        # Export button
-        self._btn_export = QPushButton("导出 Crop 数据集…")
-        self._btn_export.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; "
-            "font-weight: bold; padding: 8px; }"
-        )
-        self._btn_export.clicked.connect(self._export_crops)
-        right_layout.addWidget(self._btn_export)
-
         splitter.addWidget(right_widget)
         splitter.setSizes([200, 800, 280])
 
@@ -245,8 +303,8 @@ class PedicleFullWindow(QMainWindow):
         QShortcut(QKeySequence("Left"), self, lambda: self._set_active_side("left"))
         QShortcut(QKeySequence("Right"), self, lambda: self._set_active_side("right"))
 
-        # Visibility
-        for v in range(4):
+        # Visibility (1=遮挡, 2=模糊可见, 3=清晰可见)
+        for v in range(1, 4):
             QShortcut(QKeySequence(str(v)), self, lambda val=v: self._set_visibility(val))
 
         # Flag
@@ -318,6 +376,11 @@ class PedicleFullWindow(QMainWindow):
         self._image_list.setCurrentRow(index)
         self._image_list.blockSignals(False)
 
+        # Sync flag button to image-level flag
+        self._btn_flag.blockSignals(True)
+        self._btn_flag.setChecked(self._is_flagged(rel_path))
+        self._btn_flag.blockSignals(False)
+
         # Update all image list item colours
         self._refresh_image_list_colours()
 
@@ -352,16 +415,14 @@ class PedicleFullWindow(QMainWindow):
             pdata = self._pedicle_data.get(name, {})
             has_left = bool(pdata.get("left", {}).get("center"))
             has_right = bool(pdata.get("right", {}).get("center"))
-            flagged = pdata.get("flagged", False)
 
-            prefix = "⚑ " if flagged else ""
             suffix = ""
             if has_left and has_right:
                 suffix = " ✓"
             elif has_left or has_right:
                 suffix = " ◐"
 
-            item = QListWidgetItem(f"{prefix}{name}{suffix}")
+            item = QListWidgetItem(f"{name}{suffix}")
             self._vert_list.addItem(item)
 
         self._current_vert = vert_names[0] if vert_names else None
@@ -391,16 +452,14 @@ class PedicleFullWindow(QMainWindow):
             pdata = self._pedicle_data.get(name, {})
             has_left = bool(pdata.get("left", {}).get("center"))
             has_right = bool(pdata.get("right", {}).get("center"))
-            flagged = pdata.get("flagged", False)
 
-            prefix = "⚑ " if flagged else ""
             suffix = ""
             if has_left and has_right:
                 suffix = " ✓"
             elif has_left or has_right:
                 suffix = " ◐"
 
-            item = QListWidgetItem(f"{prefix}{name}{suffix}")
+            item = QListWidgetItem(f"{name}{suffix}")
             self._vert_list.addItem(item)
 
         # Restore selection to the active vertebra (not always first item)
@@ -408,7 +467,7 @@ class PedicleFullWindow(QMainWindow):
         if target:
             self._current_vert = target
             for i in range(self._vert_list.count()):
-                item_text = self._vert_list.item(i).text().lstrip("⚑ ").rstrip(" ✓◐")
+                item_text = self._vert_list.item(i).text().rstrip(" ✓◐")
                 if item_text == target:
                     self._vert_list.blockSignals(True)
                     self._vert_list.setCurrentRow(i)
@@ -422,7 +481,7 @@ class PedicleFullWindow(QMainWindow):
         self._sync_ui_to_vert()
         # Update vert list selection
         for i in range(self._vert_list.count()):
-            item_text = self._vert_list.item(i).text().lstrip("⚑ ").rstrip(" ✓◐")
+            item_text = self._vert_list.item(i).text().rstrip(" ✓◐")
             if item_text == vert_name:
                 self._vert_list.blockSignals(True)
                 self._vert_list.setCurrentRow(i)
@@ -432,7 +491,7 @@ class PedicleFullWindow(QMainWindow):
     def _on_vert_list_selected(self, row: int):
         if row < 0 or row >= self._vert_list.count():
             return
-        item_text = self._vert_list.item(row).text().lstrip("⚑ ").rstrip(" ✓◐")
+        item_text = self._vert_list.item(row).text().rstrip(" ✓◐")
         # Find the vert name from annotations
         for ann in self._current_annotations:
             if ann.shape_type == "obb" and ann.class_name == item_text:
@@ -499,18 +558,66 @@ class PedicleFullWindow(QMainWindow):
             btn.setEnabled(enabled)
 
     def _toggle_flag(self):
-        if not self._current_vert:
+        """Toggle flag for current image (M shortcut or button)."""
+        if self._current_image_index < 0:
             return
-        if self._current_vert not in self._pedicle_data:
-            self._pedicle_data[self._current_vert] = {
-                "left": {}, "right": {}, "flagged": False,
-            }
-        pdata = self._pedicle_data[self._current_vert]
-        pdata["flagged"] = not pdata.get("flagged", False)
-        self._btn_flag.setChecked(pdata["flagged"])
+        self._toggle_flag_by_row(self._current_image_index)
+
+    def _on_flag_toggled(self, checked: bool):
+        """Flag button toggled callback."""
+        if self._current_image_index < 0 or not self._image_infos:
+            return
+        rel_path = self._image_infos[self._current_image_index]["rel_path"]
+        self._set_flagged(rel_path, checked)
+        self._apply_image_item_style(self._current_image_index)
+
+    def _on_image_list_context_menu(self, pos):
+        """Image list right-click context menu."""
+        item = self._image_list.itemAt(pos)
+        if item is None:
+            return
+        row = self._image_list.row(item)
+        rel_path = self._image_infos[row]["rel_path"]
+        is_flagged = self._is_flagged(rel_path)
+
+        menu = QMenu(self)
+        flag_action = QAction(
+            "取消标记" if is_flagged else "标记难点",
+            self
+        )
+        flag_action.triggered.connect(lambda: self._toggle_flag_by_row(row))
+        menu.addAction(flag_action)
+
+        go_action = QAction("跳转到此图片", self)
+        go_action.triggered.connect(lambda: self._go_to_image(row))
+        menu.addAction(go_action)
+
+        menu.exec_(self._image_list.mapToGlobal(pos))
+
+    def _toggle_flag_by_row(self, row: int):
+        """Toggle flag for image at given row."""
+        rel_path = self._image_infos[row]["rel_path"]
+        new_flag = not self._is_flagged(rel_path)
+        self._set_flagged(rel_path, new_flag)
+        self._apply_image_item_style(row)
+        # Sync button if this is the current image
+        if row == self._current_image_index:
+            self._btn_flag.blockSignals(True)
+            self._btn_flag.setChecked(new_flag)
+            self._btn_flag.blockSignals(False)
+
+    def _is_flagged(self, rel_path: str) -> bool:
+        """Check if image is flagged as difficult."""
+        return bool(self._cache.get(rel_path, {}).get("flagged"))
+
+    def _set_flagged(self, rel_path: str, flagged: bool):
+        """Set/clear flag for an image."""
+        entry = self._cache.setdefault(rel_path, {})
+        entry["flagged"] = flagged
         self._has_unsaved_changes = True
-        self._update_vert_list_preserve_active()
-        self._refresh_image_list_colours()
+        # Persist to disk
+        if self._cache_path:
+            self._converter.save_progress_cache(self._cache_path, self._cache)
 
     def _on_clear_point(self):
         self._canvas.clear_active_point()
@@ -539,34 +646,97 @@ class PedicleFullWindow(QMainWindow):
         """Sync UI controls to current vertebra state."""
         if not self._current_vert:
             self._info_vert.setText("—")
-            self._btn_flag.setChecked(False)
             self._set_visibility_enabled(False)
-            return
+        else:
+            self._info_vert.setText(self._current_vert)
+            self._set_visibility_enabled(True)
+            self._sync_visibility_to_side()
 
-        self._info_vert.setText(self._current_vert)
-
-        pdata = self._pedicle_data.get(self._current_vert, {})
-        self._btn_flag.setChecked(pdata.get("flagged", False))
-        self._set_visibility_enabled(True)
-        self._sync_visibility_to_side()
+        # Sync flag button to image-level flag
+        if self._current_image_index >= 0 and self._current_image_index < len(self._image_infos):
+            rel_path = self._image_infos[self._current_image_index]["rel_path"]
+            self._btn_flag.blockSignals(True)
+            self._btn_flag.setChecked(self._is_flagged(rel_path))
+            self._btn_flag.blockSignals(False)
 
     # ------------------------------------------------------------------
     # Save / Export
     # ------------------------------------------------------------------
 
+    def _update_export_dir_label(self):
+        """Update the label showing current export directory."""
+        last_export = self._settings.value("last_export_dir", "")
+        if last_export and Path(last_export).exists():
+            self._lbl_export_dir.setText(f"导出目录: {last_export}")
+        else:
+            # Show default directory
+            if self._image_infos:
+                dataset_root = Path(self._image_infos[0]["image_path"]).parent.parent
+                default_dir = str(dataset_root.parent / "pedicle_crop_dataset")
+                self._lbl_export_dir.setText(f"导出目录: {default_dir}")
+            else:
+                self._lbl_export_dir.setText("")
+
     def _save(self):
-        """Save pedicle annotations to cache."""
+        """Save pedicle annotations to cache and write label files."""
         self._save_to_cache()
         # Persist cache to disk
         if self._cache_path:
             self._converter.save_progress_cache(self._cache_path, self._cache)
         self._has_unsaved_changes = False
         # Mark current image as saved
+        labels_written = 0
         if self._current_image_index >= 0:
             rel_path = self._image_infos[self._current_image_index]["rel_path"]
             self._saved_images.add(rel_path)
+
+            # Write label files for current image
+            labels_written = self._save_labels_for_current_image()
+
         self._refresh_image_list_colours()
-        self.statusBar().showMessage("已保存", 3000)
+        if labels_written > 0:
+            self.statusBar().showMessage(
+                f"已保存（写入 {labels_written} 个 labels 文件）", 3000
+            )
+        else:
+            self.statusBar().showMessage("已保存", 3000)
+
+    def _save_labels_for_current_image(self) -> int:
+        """Write crop-format label files for the current image."""
+        from ..core.pedicle_exporter import save_pedicle_labels_for_image
+
+        if self._current_image_index < 0:
+            return 0
+
+        info = self._image_infos[self._current_image_index]
+        rel_path = info["rel_path"]
+        pedicle_data = self._all_pedicle_data.get(rel_path, {})
+        if not pedicle_data:
+            return 0
+
+        # Determine export directory
+        last_export = self._settings.value("last_export_dir", "")
+        if last_export and Path(last_export).exists():
+            output_dir = last_export
+        else:
+            # Default: pedicle_crop_dataset under dataset root's parent
+            if self._image_infos:
+                dataset_root = Path(self._image_infos[0]["image_path"]).parent.parent
+                output_dir = str(dataset_root.parent / "pedicle_crop_dataset")
+            else:
+                return 0
+
+        # Remember export directory
+        self._settings.setValue("last_export_dir", output_dir)
+        self._update_export_dir_label()
+
+        return save_pedicle_labels_for_image(
+            info=info,
+            pedicle_data=pedicle_data,
+            cache=self._cache,
+            converter=self._converter,
+            output_dir=output_dir,
+        )
 
     def _save_to_cache(self):
         """Save current pedicle data to in-memory cache."""
@@ -578,7 +748,11 @@ class PedicleFullWindow(QMainWindow):
         if PEDICLE_CACHE_KEY not in self._cache:
             self._cache[PEDICLE_CACHE_KEY] = {}
 
+        # Preserve image-level metadata (e.g. "flagged") when updating pedicle data
+        entry = self._cache.get(rel_path, {})
+        flagged = entry.get("flagged", False)
         self._cache[PEDICLE_CACHE_KEY][rel_path] = self._pedicle_data
+        self._cache[rel_path]["flagged"] = flagged
         self._all_pedicle_data = self._cache[PEDICLE_CACHE_KEY]
 
     def _export_crops(self):
@@ -613,6 +787,7 @@ class PedicleFullWindow(QMainWindow):
 
         # Remember export directory
         self._settings.setValue("last_export_dir", output_dir)
+        self._update_export_dir_label()
 
         try:
             result = export_pedicle_crops(
@@ -634,6 +809,50 @@ class PedicleFullWindow(QMainWindow):
             )
 
     # ------------------------------------------------------------------
+    # Image enhancement handlers
+    # ------------------------------------------------------------------
+
+    def _open_enhance_dialog(self):
+        """Open/reuse enhancement parameter dialog (non-modal)."""
+        if self._current_image_index < 0:
+            QMessageBox.information(self, "提示", "请先选择一张图片")
+            return
+        if self._enhance_dialog is not None and self._enhance_dialog.isVisible():
+            self._enhance_dialog.raise_()
+            self._enhance_dialog.activateWindow()
+            return
+        cur = self._canvas.get_enhance_params()
+        self._enhance_dialog = EnhancementDialog(cur, parent=self)
+        self._enhance_dialog.params_changed.connect(self._on_enhance_dialog_changed)
+        self._enhance_dialog.show()
+
+    def _on_enhance_dialog_changed(self, params: EnhanceParams):
+        self._canvas.set_enhance_params(params)
+        self._enhance_toolbar.sync_from_params(params)
+
+    def _on_enhance_invert_toggled(self, checked: bool):
+        """Toolbar invert button → toggle invert only."""
+        cur = self._canvas.get_enhance_params()
+        new = EnhanceParams(
+            brightness=cur.brightness,
+            contrast=cur.contrast,
+            gamma=cur.gamma,
+            clahe=cur.clahe,
+            invert=bool(checked),
+        )
+        self._canvas.set_enhance_params(new)
+        self._enhance_toolbar.sync_from_params(new)
+
+    def _reset_enhance_params(self):
+        """Reset enhancement params to default."""
+        default = EnhanceParams()
+        self._canvas.set_enhance_params(default)
+        self._enhance_toolbar.sync_from_params(default)
+        if self._enhance_dialog is not None and self._enhance_dialog.isVisible():
+            self._enhance_dialog.close()
+            self._enhance_dialog = None
+
+    # ------------------------------------------------------------------
     # Window lifecycle
     # ------------------------------------------------------------------
 
@@ -652,27 +871,46 @@ class PedicleFullWindow(QMainWindow):
     # Image list visual feedback
     # ------------------------------------------------------------------
 
-    def _refresh_image_list_colours(self):
-        """Update colours of all image list items based on saved state."""
+    def _apply_image_item_style(self, row: int):
+        """Apply style to a single image list item."""
+        if row < 0 or row >= self._image_list.count() or row >= len(self._image_infos):
+            return
+        item = self._image_list.item(row)
+        rel_path = self._image_infos[row]["rel_path"]
+        is_current = (row == self._current_image_index)
+        is_saved = rel_path in self._saved_images
+        is_flagged = self._is_flagged(rel_path)
+
+        # Build display text (icon handles flag indicator, no text prefix needed)
+        info = self._image_infos[row]
+        name = Path(info["image_path"]).stem
+        split = info.get("split", "")
+        display = f"[{split}] {name}" if split else name
+        item.setText(display)
+
+        # Flag icon (same visual effect as main window)
+        if is_flagged:
+            item.setIcon(_get_flag_icon())
+        else:
+            item.setIcon(QIcon())
+
         palette = self._image_list.palette()
+        if is_flagged:
+            item.setForeground(QBrush(QColor("#e03131")))  # Red for flagged
+        elif is_current and self._has_unsaved_changes:
+            item.setForeground(QBrush(QColor("#e8590c")))  # Orange: unsaved
+        elif is_saved:
+            item.setForeground(palette.brush(QPalette.Disabled, QPalette.Text))  # Gray: saved
+        else:
+            item.setForeground(palette.brush(QPalette.Active, QPalette.Text))  # Default
+
+        font = item.font()
+        font.setBold(is_current)
+        item.setFont(font)
+
+    def _refresh_image_list_colours(self):
+        """Update colours of all image list items based on saved/flagged state."""
         for i in range(self._image_list.count()):
-            item = self._image_list.item(i)
             if i >= len(self._image_infos):
                 break
-            rel_path = self._image_infos[i]["rel_path"]
-            is_current = (i == self._current_image_index)
-            is_saved = rel_path in self._saved_images
-
-            if is_current and self._has_unsaved_changes:
-                # Orange: current image with unsaved modifications
-                item.setForeground(QBrush(QColor("#e8590c")))
-            elif is_saved:
-                # Gray: already saved to disk
-                item.setForeground(palette.brush(QPalette.Disabled, QPalette.Text))
-            else:
-                # Default: not yet worked on
-                item.setForeground(palette.brush(QPalette.Active, QPalette.Text))
-
-            font = item.font()
-            font.setBold(is_current)
-            item.setFont(font)
+            self._apply_image_item_style(i)

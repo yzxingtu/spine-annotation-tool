@@ -2,13 +2,17 @@
 
 from typing import Dict, List, Optional, Tuple
 
+import cv2
+import numpy as np
+
 from PyQt5.QtCore import QRectF, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QPen, QPixmap
+from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsPixmapItem, QGraphicsRectItem,
     QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
 )
 
+from ..core.image_enhancer import EnhanceParams, apply_enhancement
 from ..core.models import OBBAnnotation, VertebraCategory, get_vertebra_category
 
 # Pedicle point visual style
@@ -56,6 +60,10 @@ class PedicleFullCanvas(QGraphicsView):
         self._active_side: str = "left"
         self._show_ring: bool = True
 
+        # Original image for enhancement pipeline
+        self._original_image: Optional[np.ndarray] = None
+        self._enhance_params: EnhanceParams = EnhanceParams()
+
         # Scene items
         self._bg_item: Optional[QGraphicsPixmapItem] = None
         self._aabb_items: Dict[str, QGraphicsRectItem] = {}
@@ -98,8 +106,15 @@ class PedicleFullCanvas(QGraphicsView):
         self._point_labels = []
         self._active_ring = None
 
-        # Background image
-        pixmap = QPixmap(image_path)
+        # Background image (store as numpy for enhancement pipeline)
+        img = self._imread_unicode(image_path)
+        if img is not None:
+            self._original_image = img
+            pixmap = self._numpy_to_pixmap(apply_enhancement(img, self._enhance_params))
+        else:
+            # Fallback: direct QPixmap (no enhancement)
+            self._original_image = None
+            pixmap = QPixmap(image_path)
         if not pixmap.isNull():
             self._bg_item = self._scene.addPixmap(pixmap)
             self._scene.setSceneRect(QRectF(pixmap.rect()))
@@ -162,6 +177,54 @@ class PedicleFullCanvas(QGraphicsView):
                 self._aabb_items[name].setVisible(visible)
             if name in self._label_items:
                 self._label_items[name].setVisible(visible)
+
+    # ------------------------------------------------------------------
+    # Image enhancement
+    # ------------------------------------------------------------------
+
+    def set_enhance_params(self, params: EnhanceParams):
+        """Update enhancement params and re-render background (no coord change)."""
+        self._enhance_params = params
+        if self._original_image is None or self._bg_item is None:
+            return
+        rendered = apply_enhancement(self._original_image, self._enhance_params)
+        self._bg_item.setPixmap(self._numpy_to_pixmap(rendered))
+        self._bg_item.update()
+        self.viewport().update()
+
+    def get_enhance_params(self) -> EnhanceParams:
+        return self._enhance_params
+
+    @staticmethod
+    def _numpy_to_pixmap(img: np.ndarray) -> QPixmap:
+        """Convert OpenCV BGR / grayscale numpy to QPixmap."""
+        if img.ndim == 2:
+            buf = np.ascontiguousarray(img)
+            h, w = buf.shape
+            qimg = QImage(buf.data, w, h, w, QImage.Format_Grayscale8)
+        else:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            buf = np.ascontiguousarray(rgb)
+            h, w, ch = buf.shape
+            qimg = QImage(buf.data, w, h, ch * w, QImage.Format_RGB888)
+        return QPixmap.fromImage(qimg.copy())
+
+    @staticmethod
+    def _imread_unicode(path: str) -> Optional[np.ndarray]:
+        """Read image with Unicode path fallback for Windows."""
+        try:
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            if img is not None:
+                return img
+        except Exception:
+            pass
+        try:
+            data = np.fromfile(path, dtype=np.uint8)
+            if data.size == 0:
+                return None
+            return cv2.imdecode(data, cv2.IMREAD_COLOR)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Rendering
@@ -453,12 +516,19 @@ class PedicleFullCanvas(QGraphicsView):
             self._update_aabb_highlight()
             self.vertebra_clicked.emit(hit_vert)
 
-            # Auto-switch side if current side already has a point
+            # Determine which side to add:
+            # - No points at all → always add L first
+            # - Has L → add R
+            # - Has R → add L
             pdata = self._pedicle_data.get(self._active_vertebra, {})
-            side_data = pdata.get(self._active_side, {})
-            if side_data.get("center"):
-                self._active_side = "right" if self._active_side == "left" else "left"
-                self.side_selected.emit()
+            has_left = bool(pdata.get("left", {}).get("center"))
+            has_right = bool(pdata.get("right", {}).get("center"))
+            if has_left and not has_right:
+                self._active_side = "right"
+            else:
+                # No points, or already has R → default to L
+                self._active_side = "left"
+            self.side_selected.emit()
 
             self._set_point(self._active_side, px, py)
 
